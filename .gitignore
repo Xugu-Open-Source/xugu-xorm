@@ -5,6 +5,9 @@ go.work.sum
 # Agent prompt 文档（本地使用，不提交）
 promt/
 
+# 发版日志（本地使用，不提交）
+log/
+
 # 编译产物
 *.exe
 *.exe~

@@ -177,7 +177,7 @@ func TestXuguGenScanResultUnsignedStripping(t *testing.T) {
 func TestXuguSQLType(t *testing.T) {
 	d := newXuguDialectInit(t, "test")
 
-	newCol := func(name string, l1, l2 int) *schemas.Column {
+	newCol := func(name string, l1, l2 int64) *schemas.Column {
 		return &schemas.Column{
 			Name:    name,
 			SQLType: schemas.SQLType{Name: name},

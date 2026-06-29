@@ -333,9 +333,9 @@ func (db *xugu) SQLType(c *schemas.Column) string {
 	hasLen2 := c.Length2 > 0
 
 	if hasLen2 {
-		res += "(" + strconv.Itoa(c.Length) + "," + strconv.Itoa(c.Length2) + ")"
+		res += "(" + strconv.FormatInt(c.Length, 10) + "," + strconv.FormatInt(c.Length2, 10) + ")"
 	} else if hasLen1 {
-		res += "(" + strconv.Itoa(c.Length) + ")"
+		res += "(" + strconv.FormatInt(c.Length, 10) + ")"
 	}
 
 	if isUnsigned {
@@ -435,7 +435,7 @@ WHERE t1.TABLE_NAME = ?;
 		col.Comment = comment.String
 		col.Nullable = !notNUll
 
-		col.SQLType = schemas.SQLType{Name: typeName, DefaultLength: int(scale), DefaultLength2: 0}
+		col.SQLType = schemas.SQLType{Name: typeName, DefaultLength: int64(scale), DefaultLength2: 0}
 		if cons_type.Valid {
 			switch cons_type.String {
 			case "P":
