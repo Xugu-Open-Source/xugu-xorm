@@ -306,5 +306,5 @@ modernc.org/z v1.7.0 h1:xkDw/KepgEjeizO2sNco+hqYkU12taxQFqPEmgm1GWE=
 modernc.org/z v1.7.0/go.mod h1:hVdgNMh8ggTuRG1rGU8x+xGRFfiQUIAw0ZqlPy8+HyQ=
 xorm.io/builder v0.3.11-0.20220531020008-1bd24a7dc978 h1:bvLlAPW1ZMTWA32LuZMBEGHAUOcATZjzHcotf3SWweM=
 xorm.io/builder v0.3.11-0.20220531020008-1bd24a7dc978/go.mod h1:aUW0S9eb9VCaPohFCH3j7czOx1PMW3i1HrSzbLYGBSE=
-xorm.io/xorm v1.3.3 h1:L5/GOhvgMcwJYYRjzPf3lTTTf6JcaTd1Mb9A/Iqvccw=
-xorm.io/xorm v1.3.3/go.mod h1:qFJGFoVYbbIdnz2vaL5OxSQ2raleMpyRRalnq3n9OJo=
+xorm.io/xorm v1.3.4 h1:vWFKzR3DhGUDl5b4srhUjhDwjxkZAc4C7BFszpu0swI=
+xorm.io/xorm v1.3.4/go.mod h1:qFJGFoVYbbIdnz2vaL5OxSQ2raleMpyRRalnq3n9OJo=
