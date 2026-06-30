@@ -384,7 +384,7 @@ func (db *xugu) IsTableExist(queryer core.Queryer, ctx context.Context, tableNam
 
 func (db *xugu) AddColumnSQL(tableName string, col *schemas.Column) string {
 	quoter := db.Quoter()
-	s, _ := dialects.ColumnString(db, col, true)
+	s, _ := dialects.ColumnString(db, col, true, false)
 	sql := fmt.Sprintf("ALTER TABLE %v ADD %v", quoter.Quote(tableName), s)
 	if len(col.Comment) > 0 {
 		sql += " COMMENT '" + col.Comment + "'"
@@ -395,7 +395,7 @@ func (db *xugu) AddColumnSQL(tableName string, col *schemas.Column) string {
 // ModifyColumnSQL overrides the base implementation to use our Quoter()
 // instead of the unexported Base.quoter field.
 func (db *xugu) ModifyColumnSQL(tableName string, col *schemas.Column) string {
-	s, _ := dialects.ColumnString(db, col, false)
+	s, _ := dialects.ColumnString(db, col, false, false)
 	return fmt.Sprintf("ALTER TABLE %v MODIFY COLUMN %v", db.Quoter().Quote(tableName), s)
 }
 

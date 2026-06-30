@@ -802,7 +802,7 @@ func TestXuguNullableLogic(t *testing.T) {
 		Nullable:       false,
 		DefaultIsEmpty: true,
 	}
-	sql, err := dialects.ColumnString(d, col, false)
+	sql, err := dialects.ColumnString(d, col, false, false)
 	assert.NoError(t, err)
 	assert.True(t, strings.HasSuffix(sql, "NOT NULL"),
 		"nullable=false should produce NOT NULL suffix, got: %s", sql)
@@ -817,7 +817,7 @@ func TestXuguNullableLogic(t *testing.T) {
 		Nullable:       true,
 		DefaultIsEmpty: true,
 	}
-	sql2, err := dialects.ColumnString(d, col2, false)
+	sql2, err := dialects.ColumnString(d, col2, false, false)
 	assert.NoError(t, err)
 	assert.Contains(t, sql2, "NULL")
 	assert.NotContains(t, sql2, "NOT NULL")

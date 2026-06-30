@@ -61,11 +61,11 @@ func TestNullableLogicFix(t *testing.T) {
 		DefaultIsEmpty: true,
 	}
 
-	s1, err := dialects.ColumnString(d, nullCol, false)
+	s1, err := dialects.ColumnString(d, nullCol, false, false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	s2, err := dialects.ColumnString(d, notNullCol, false)
+	s2, err := dialects.ColumnString(d, notNullCol, false, false)
 	if err != nil {
 		t.Fatal(err)
 	}
