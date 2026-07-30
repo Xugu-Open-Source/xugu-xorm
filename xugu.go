@@ -5,243 +5,84 @@
 package xugu
 
 import (
-	"context"
 	"database/sql"
-	"errors"
 	"fmt"
 	"strconv"
 	"strings"
 
-	"xorm.io/xorm/core"
-	"xorm.io/xorm/dialects"
-	"xorm.io/xorm/schemas"
+	"github.com/go-xorm/core"
 )
 
 func init() {
-	dialects.RegisterDriver("xugu", &xuguDriver{})
-	dialects.RegisterDialect("xugusql", func() dialects.Dialect {
+	core.RegisterDriver("xugu", &xuguDriver{})
+	core.RegisterDialect("xugusql", func() core.Dialect {
 		return &xugu{}
 	})
 }
 
-var (
-	xuguReservedWords = map[string]bool{
-		"ADD":               true,
-		"ALL":               true,
-		"ALTER":             true,
-		"ANALYZE":           true,
-		"AND":               true,
-		"AS":                true,
-		"ASC":               true,
-		"ASENSITIVE":        true,
-		"BEFORE":            true,
-		"BETWEEN":           true,
-		"BIGINT":            true,
-		"BINARY":            true,
-		"BLOB":              true,
-		"BOTH":              true,
-		"BY":                true,
-		"CALL":              true,
-		"CASCADE":           true,
-		"CASE":              true,
-		"CHAIN":             true,
-		"CHANGE":            true,
-		"CHAR":              true,
-		"CHARACTER":         true,
-		"CHECK":             true,
-		"COLLATE":           true,
-		"COLUMN":            true,
-		"CONDITION":         true,
-		"CONNECTION":        true,
-		"CONSTRAINT":        true,
-		"CONTINUE":          true,
-		"CONVERT":           true,
-		"CREATE":            true,
-		"CROSS":             true,
-		"CURRENT_DATE":      true,
-		"CURRENT_TIME":      true,
-		"CURRENT_TIMESTAMP": true,
-		"CURRENT_USER":      true,
-		"CURSOR":            true,
-		"DATABASE":          true,
-		"DATABASES":         true,
-		"DAY_HOUR":          true,
-		"DAY_MICROSECOND":   true,
-		"DAY_MINUTE":        true,
-		"DAY_SECOND":        true,
-		"DEC":               true,
-		"DECIMAL":           true,
-		"DECLARE":           true,
-		"DEFAULT":           true,
-		"DELAYED":           true,
-		"DELETE":            true,
-		"DESC":              true,
-		"DESCRIBE":          true,
-		"DETERMINISTIC":     true,
-		"DISTINCT":          true,
-		"DISTINCTROW":       true,
-		"DIV":               true,
-		"DOUBLE":            true,
-		"DROP":              true,
-		"DUAL":              true,
-		"EACH":              true,
-		"ELSE":              true,
-		"ELSEIF":            true,
-		"ENCLOSED":          true,
-		"ESCAPED":           true,
-		"EXISTS":            true,
-		"EXIT":              true,
-		"EXPLAIN":           true,
-		"FALSE":             true,
-		"FETCH":             true,
-		"FLOAT":             true,
-		"FLOAT4":            true,
-		"FLOAT8":            true,
-		"FOR":               true,
-		"FORCE":             true,
-		"FOREIGN":           true,
-		"FROM":              true,
-		"FULLTEXT":          true,
-		"GOTO":              true,
-		"GRANT":             true,
-		"GROUP":             true,
-		"HAVING":            true,
-		"HIGH_PRIORITY":     true,
-		"HOUR_MICROSECOND":  true,
-		"HOUR_MINUTE":       true,
-		"HOUR_SECOND":       true,
-		"IF":                true,
-		"IGNORE":            true,
-		"IN":                true, "INDEX": true,
-		"INFILE": true, "INNER": true, "INOUT": true,
-		"INSENSITIVE": true, "INSERT": true, "INT": true,
-		"INT1": true, "INT2": true, "INT3": true,
-		"INT4": true, "INT8": true, "INTEGER": true,
-		"INTERVAL": true, "INTO": true, "IS": true,
-		"ITERATE": true, "JOIN": true, "KEY": true,
-		"KEYS": true, "KILL": true, "LABEL": true,
-		"LEADING": true, "LEAVE": true, "LEFT": true,
-		"LIKE": true, "LIMIT": true, "LINEAR": true,
-		"LINES": true, "LOAD": true, "LOCALTIME": true,
-		"LOCALTIMESTAMP": true, "LOCK": true, "LONG": true,
-		"LONGBLOB": true, "LONGTEXT": true, "LOOP": true,
-		"LOW_PRIORITY": true, "MATCH": true, "MEDIUMBLOB": true,
-		"MEDIUMINT": true, "MEDIUMTEXT": true, "MIDDLEINT": true,
-		"MINUTE_MICROSECOND": true, "MINUTE_SECOND": true, "MOD": true,
-		"MODIFIES": true, "NATURAL": true, "NOT": true,
-		"NO_WRITE_TO_BINLOG": true, "NULL": true, "NUMERIC": true,
-		"ON": true, "OPTIMIZE": true, "OPTION": true,
-		"OPTIONALLY": true, "OR": true, "ORDER": true,
-		"OUT": true, "OUTER": true, "OUTFILE": true,
-		"PRECISION": true, "PRIMARY": true, "PROCEDURE": true,
-		"PURGE": true, "RAID0": true, "RANGE": true,
-		"RANK": true,
-		"READ": true, "READS": true, "REAL": true,
-		"REFERENCES": true, "REGEXP": true, "RELEASE": true,
-		"RENAME": true, "REPEAT": true, "REPLACE": true,
-		"REQUIRE": true, "RESTRICT": true, "RETURN": true,
-		"REVOKE": true, "RIGHT": true, "RLIKE": true,
-		"SCHEMA": true, "SCHEMAS": true, "SECOND_MICROSECOND": true,
-		"SELECT": true, "SENSITIVE": true, "SEPARATOR": true,
-		"SET": true, "SHOW": true, "SMALLINT": true,
-		"SPATIAL": true, "SPECIFIC": true, "SQL": true,
-		"SQLEXCEPTION": true, "SQLSTATE": true, "SQLWARNING": true,
-		"SQL_BIG_RESULT": true, "SQL_CALC_FOUND_ROWS": true, "SQL_SMALL_RESULT": true,
-		"SSL": true, "STARTING": true, "STRAIGHT_JOIN": true,
-		"TABLE": true, "TERMINATED": true, "THEN": true,
-		"TINYBLOB": true, "TINYINT": true, "TINYTEXT": true,
-		"TO": true, "TRAILING": true, "TRIGGER": true,
-		"TRUE": true, "UNDO": true, "UNION": true,
-		"UNIQUE": true, "UNLOCK": true, "UNSIGNED": true,
-		"UPDATE": true, "USAGE": true, "USE": true,
-		"USING": true, "UTC_DATE": true, "UTC_TIME": true,
-		"UTC_TIMESTAMP": true, "VALUES": true, "VARBINARY": true,
-		"VARCHAR":      true,
-		"VARCHARACTER": true,
-		"VARYING":      true,
-		"WHEN":         true,
-		"WHERE":        true,
-		"WHILE":        true,
-		"WITH":         true,
-		"WRITE":        true,
-		"X509":         true,
-		"XOR":          true,
-		"YEAR_MONTH":   true,
-		"ZEROFILL":     true,
-	}
-
-	xuguQuoter = schemas.Quoter{
-		Prefix:     '`',
-		Suffix:     '`',
-		IsReserved: schemas.AlwaysReserve,
-	}
-)
+var xuguReservedWords = map[string]bool{
+	"ADD": true, "ALL": true, "ALTER": true, "ANALYZE": true, "AND": true,
+	"AS": true, "ASC": true, "ASENSITIVE": true, "BEFORE": true, "BETWEEN": true,
+	"BIGINT": true, "BINARY": true, "BLOB": true, "BOTH": true, "BY": true,
+	"CALL": true, "CASCADE": true, "CASE": true, "CHAIN": true, "CHANGE": true,
+	"CHAR": true, "CHARACTER": true, "CHECK": true, "COLLATE": true, "COLUMN": true,
+	"CONDITION": true, "CONNECTION": true, "CONSTRAINT": true, "CONTINUE": true,
+	"CONVERT": true, "CREATE": true, "CROSS": true, "CURRENT_DATE": true,
+	"CURRENT_TIME": true, "CURRENT_TIMESTAMP": true, "CURRENT_USER": true,
+	"CURSOR": true, "DATABASE": true, "DATABASES": true, "DAY_HOUR": true,
+	"DAY_MICROSECOND": true, "DAY_MINUTE": true, "DAY_SECOND": true, "DEC": true,
+	"DECIMAL": true, "DECLARE": true, "DEFAULT": true, "DELAYED": true,
+	"DELETE": true, "DESC": true, "DESCRIBE": true, "DETERMINISTIC": true,
+	"DISTINCT": true, "DISTINCTROW": true, "DIV": true, "DOUBLE": true,
+	"DROP": true, "DUAL": true, "EACH": true, "ELSE": true, "ELSEIF": true,
+	"ENCLOSED": true, "ESCAPED": true, "EXISTS": true, "EXIT": true,
+	"EXPLAIN": true, "FALSE": true, "FETCH": true, "FLOAT": true, "FLOAT4": true,
+	"FLOAT8": true, "FOR": true, "FORCE": true, "FOREIGN": true, "FROM": true,
+	"FULLTEXT": true, "GOTO": true, "GRANT": true, "GROUP": true, "HAVING": true,
+	"HIGH_PRIORITY": true, "HOUR_MICROSECOND": true, "HOUR_MINUTE": true,
+	"HOUR_SECOND": true, "IF": true, "IGNORE": true, "IN": true, "INDEX": true,
+	"INFILE": true, "INNER": true, "INOUT": true, "INSENSITIVE": true,
+	"INSERT": true, "INT": true, "INT1": true, "INT2": true, "INT3": true,
+	"INT4": true, "INT8": true, "INTEGER": true, "INTERVAL": true, "INTO": true,
+	"IS": true, "ITERATE": true, "JOIN": true, "KEY": true, "KEYS": true,
+	"KILL": true, "LABEL": true, "LEADING": true, "LEAVE": true, "LEFT": true,
+	"LIKE": true, "LIMIT": true, "LINEAR": true, "LINES": true, "LOAD": true,
+	"LOCALTIME": true, "LOCALTIMESTAMP": true, "LOCK": true, "LONG": true,
+	"LONGBLOB": true, "LONGTEXT": true, "LOOP": true, "LOW_PRIORITY": true,
+	"MATCH": true, "MEDIUMBLOB": true, "MEDIUMINT": true, "MEDIUMTEXT": true,
+	"MIDDLEINT": true, "MINUTE_MICROSECOND": true, "MINUTE_SECOND": true,
+	"MOD": true, "MODIFIES": true, "NATURAL": true, "NOT": true,
+	"NO_WRITE_TO_BINLOG": true, "NULL": true, "NUMERIC": true, "ON": true,
+	"OPTIMIZE": true, "OPTION": true, "OPTIONALLY": true, "OR": true,
+	"ORDER": true, "OUT": true, "OUTER": true, "OUTFILE": true, "PRECISION": true,
+	"PRIMARY": true, "PROCEDURE": true, "PURGE": true, "RAID0": true, "RANGE": true,
+	"RANK": true, "READ": true, "READS": true, "REAL": true, "REFERENCES": true,
+	"REGEXP": true, "RELEASE": true, "RENAME": true, "REPEAT": true,
+	"REPLACE": true, "REQUIRE": true, "RESTRICT": true, "RETURN": true,
+	"REVOKE": true, "RIGHT": true, "RLIKE": true, "SCHEMA": true, "SCHEMAS": true,
+	"SECOND_MICROSECOND": true, "SELECT": true, "SENSITIVE": true,
+	"SEPARATOR": true, "SET": true, "SHOW": true, "SMALLINT": true,
+	"SPATIAL": true, "SPECIFIC": true, "SQL": true, "SQLEXCEPTION": true,
+	"SQLSTATE": true, "SQLWARNING": true, "SQL_BIG_RESULT": true,
+	"SQL_CALC_FOUND_ROWS": true, "SQL_SMALL_RESULT": true, "SSL": true,
+	"STARTING": true, "STRAIGHT_JOIN": true, "TABLE": true, "TERMINATED": true,
+	"THEN": true, "TINYBLOB": true, "TINYINT": true, "TINYTEXT": true, "TO": true,
+	"TRAILING": true, "TRIGGER": true, "TRUE": true, "UNDO": true, "UNION": true,
+	"UNIQUE": true, "UNLOCK": true, "UNSIGNED": true, "UPDATE": true,
+	"USAGE": true, "USE": true, "USING": true, "UTC_DATE": true, "UTC_TIME": true,
+	"UTC_TIMESTAMP": true, "VALUES": true, "VARBINARY": true, "VARCHAR": true,
+	"VARCHARACTER": true, "VARYING": true, "WHEN": true, "WHERE": true,
+	"WHILE": true, "WITH": true, "WRITE": true, "X509": true, "XOR": true,
+	"YEAR_MONTH": true, "ZEROFILL": true,
+}
 
 type xugu struct {
-	dialects.Base
+	core.Base
 	rowFormat string
-	quoter    schemas.Quoter // shadows Base.quoter; used via Quoter() override
 }
 
-func (db *xugu) Init(uri *dialects.URI) error {
-	db.quoter = xuguQuoter
-	return db.Base.Init(db, uri)
-}
-
-// Quoter overrides Base.Quoter to return the xugu quoter.
-func (db *xugu) Quoter() schemas.Quoter {
-	return db.quoter
-}
-
-var xuguColAliases = map[string]string{
-	"numeric": "decimal",
-}
-
-// Alias returns a alias of column
-func (db *xugu) Alias(col string) string {
-	v, ok := xuguColAliases[strings.ToLower(col)]
-	if ok {
-		return v
-	}
-	return col
-}
-
-func (db *xugu) Version(ctx context.Context, queryer core.Queryer) (*schemas.Version, error) {
-	rows, err := queryer.QueryContext(ctx, "SELECT VERSION;")
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var version string
-	if !rows.Next() {
-		if rows.Err() != nil {
-			return nil, rows.Err()
-		}
-		return nil, errors.New("unknow version")
-	}
-
-	if err := rows.Scan(&version); err != nil {
-		return nil, err
-	}
-
-	fields := strings.Split(version, " ")
-
-	var edition string
-	if len(fields) == 2 {
-		edition = fields[0]
-	}
-
-	return &schemas.Version{
-		Number:  fields[1],
-		Edition: edition,
-	}, nil
-}
-
-func (db *xugu) Features() *dialects.DialectFeatures {
-	return &dialects.DialectFeatures{
-		AutoincrMode: dialects.IncrAutoincrMode,
-	}
+func (db *xugu) Init(d *core.DB, uri *core.Uri, drivername, dataSourceName string) error {
+	return db.Base.Init(d, db, uri, drivername, dataSourceName)
 }
 
 func (db *xugu) SetParams(params map[string]string) {
@@ -249,42 +90,35 @@ func (db *xugu) SetParams(params map[string]string) {
 	if ok {
 		t := strings.ToUpper(rowFormat)
 		switch t {
-		case "COMPACT":
-			fallthrough
-		case "REDUNDANT":
-			fallthrough
-		case "DYNAMIC":
-			fallthrough
-		case "COMPRESSED":
+		case "COMPACT", "REDUNDANT", "DYNAMIC", "COMPRESSED":
 			db.rowFormat = t
 		}
 	}
 }
 
-func (db *xugu) SQLType(c *schemas.Column) string {
+func (db *xugu) SqlType(c *core.Column) string {
 	var res string
-	var isUnsigned bool
 	switch t := c.SQLType.Name; t {
-	case schemas.Bool:
-		res = schemas.TinyInt
+	case core.Bool:
+		res = core.TinyInt
 		c.Length = 1
-	case schemas.Serial:
+	case core.Serial:
 		c.IsAutoIncrement = true
 		c.IsPrimaryKey = true
 		c.Nullable = false
-		res = schemas.Int
-	case schemas.BigSerial:
+		res = core.Int
+	case core.BigSerial:
 		c.IsAutoIncrement = true
 		c.IsPrimaryKey = true
 		c.Nullable = false
-		res = schemas.BigInt
-	case schemas.Bytea:
-		res = schemas.Blob
-	case schemas.TimeStampz:
-		res = schemas.Char
+		res = core.BigInt
+	case core.Bytea:
+		res = core.Blob
+	case core.TimeStampz:
+		res = core.Char
 		c.Length = 64
-	case schemas.Enum: // xugu enum
-		res = schemas.Enum
+	case core.Enum:
+		res = core.Enum
 		res += "("
 		opts := ""
 		for v := range c.EnumOptions {
@@ -292,8 +126,8 @@ func (db *xugu) SQLType(c *schemas.Column) string {
 		}
 		res += strings.TrimLeft(opts, ",")
 		res += ")"
-	case schemas.Set: // xugu set
-		res = schemas.Set
+	case core.Set:
+		res = core.Set
 		res += "("
 		opts := ""
 		for v := range c.SetOptions {
@@ -301,63 +135,33 @@ func (db *xugu) SQLType(c *schemas.Column) string {
 		}
 		res += strings.TrimLeft(opts, ",")
 		res += ")"
-	case schemas.NVarchar:
-		res = schemas.Varchar
-	case schemas.Uuid:
-		res = schemas.Varchar
+	case core.NVarchar:
+		res = core.Varchar
+	case core.Uuid:
+		res = core.Varchar
 		c.Length = 40
-	case schemas.Json:
-		res = schemas.Text
-	case schemas.UnsignedInt:
-		res = schemas.Int
-		isUnsigned = true
-	case schemas.UnsignedBigInt:
-		res = schemas.BigInt
-		isUnsigned = true
-	case schemas.UnsignedMediumInt:
-		res = schemas.MediumInt
-		isUnsigned = true
-	case schemas.UnsignedSmallInt:
-		res = schemas.SmallInt
-		isUnsigned = true
-	case schemas.UnsignedTinyInt:
-		res = schemas.TinyInt
-		isUnsigned = true
-	case schemas.Float:
-		res = schemas.Float
+	case core.Json:
+		res = core.Text
+	case core.Float:
+		res = core.Float
+	case "NUMERIC":
+		res = core.Decimal
 	default:
 		res = t
 	}
 
 	hasLen1 := c.Length > 0
 	hasLen2 := c.Length2 > 0
-
 	if hasLen2 {
-		res += "(" + strconv.FormatInt(c.Length, 10) + "," + strconv.FormatInt(c.Length2, 10) + ")"
+		res += "(" + strconv.Itoa(c.Length) + "," + strconv.Itoa(c.Length2) + ")"
 	} else if hasLen1 {
-		res += "(" + strconv.FormatInt(c.Length, 10) + ")"
+		res += "(" + strconv.Itoa(c.Length) + ")"
 	}
-
-	if isUnsigned {
-		//res += " UNSIGNED"
-	}
-
 	return res
 }
 
-func (db *xugu) ColumnTypeKind(t string) int {
-	switch strings.ToUpper(t) {
-	case "DATETIME", "TIMESTAMP", "DATE", "TIME":
-		return schemas.TIME_TYPE
-	case "CHAR", "VARCHAR", "TINYTEXT", "TEXT", "MEDIUMTEXT", "LONGTEXT", "ENUM", "SET":
-		return schemas.TEXT_TYPE
-	case "BIGINT", "TINYINT", "SMALLINT", "MEDIUMINT", "INT", "FLOAT", "REAL", "DOUBLE PRECISION", "DECIMAL", "NUMERIC", "BIT":
-		return schemas.NUMERIC_TYPE
-	case "BINARY", "VARBINARY", "TINYBLOB", "BLOB", "MEDIUMBLOB", "LONGBLOB":
-		return schemas.BLOB_TYPE
-	default:
-		return schemas.UNKNOW_TYPE
-	}
+func (db *xugu) SupportInsertMany() bool {
+	return true
 }
 
 func (db *xugu) IsReserved(name string) bool {
@@ -365,142 +169,129 @@ func (db *xugu) IsReserved(name string) bool {
 	return ok
 }
 
+func (db *xugu) Quote(name string) string {
+	return "`" + name + "`"
+}
+
+func (db *xugu) QuoteStr() string {
+	return "`"
+}
+
+func (db *xugu) SupportEngine() bool {
+	return false
+}
+
+func (db *xugu) SupportCharset() bool {
+	return false
+}
+
+func (db *xugu) SupportDropIfExists() bool {
+	return true
+}
+
+func (db *xugu) IndexOnTable() bool {
+	return true
+}
+
 func (db *xugu) AutoIncrStr() string {
 	return "IDENTITY"
 }
 
-func (db *xugu) IndexCheckSQL(tableName, idxName string) (string, []interface{}) {
+func (db *xugu) IndexCheckSql(tableName, idxName string) (string, []interface{}) {
 	args := []interface{}{tableName, idxName}
-	sql := `SELECT  INDEX_NAME FROM ALL_INDEXES i  
-		JOIN ALL_TABLEs t ON i.TABLE_ID = t.TABLE_ID
-		WHERE t.table_name = ? AND index_name = ?;`
+	sql := `SELECT INDEX_NAME FROM ALL_INDEXES i
+		JOIN ALL_TABLES t ON i.TABLE_ID = t.TABLE_ID
+		WHERE t.table_name = ? AND index_name = ?`
 	return sql, args
 }
 
-func (db *xugu) IsTableExist(queryer core.Queryer, ctx context.Context, tableName string) (bool, error) {
-	sql := `SELECT TABLE_NAME FROM ALL_TABLES WHERE TABLE_NAME = ?`
-	return db.HasRecords(queryer, ctx, sql, tableName)
+func (db *xugu) TableCheckSql(tableName string) (string, []interface{}) {
+	args := []interface{}{tableName}
+	return `SELECT TABLE_NAME FROM ALL_TABLES WHERE TABLE_NAME = ?`, args
 }
 
-func (db *xugu) AddColumnSQL(tableName string, col *schemas.Column) string {
-	quoter := db.Quoter()
-	s, _ := dialects.ColumnString(db, col, true, false)
-	sql := fmt.Sprintf("ALTER TABLE %v ADD %v", quoter.Quote(tableName), s)
-	if len(col.Comment) > 0 {
-		sql += " COMMENT '" + col.Comment + "'"
-	}
-	return sql
+func (db *xugu) IsColumnExist(tableName, colName string) (bool, error) {
+	query := `SELECT c.COL_NAME FROM ALL_COLUMNS c
+		JOIN ALL_TABLES t ON c.TABLE_ID = t.TABLE_ID
+		WHERE t.TABLE_NAME = ? AND c.COL_NAME = ?`
+	return db.HasRecords(query, tableName, colName)
 }
 
-// ModifyColumnSQL overrides the base implementation to use our Quoter()
-// instead of the unexported Base.quoter field.
-func (db *xugu) ModifyColumnSQL(tableName string, col *schemas.Column) string {
-	s, _ := dialects.ColumnString(db, col, false, false)
-	return fmt.Sprintf("ALTER TABLE %v MODIFY COLUMN %v", db.Quoter().Quote(tableName), s)
+func (db *xugu) ModifyColumnSql(tableName string, col *core.Column) string {
+	return fmt.Sprintf("ALTER TABLE %s MODIFY COLUMN %s", db.Quote(tableName), col.StringNoPk(db))
 }
 
-func (db *xugu) GetColumns(queryer core.Queryer, ctx context.Context, tableName string) ([]string, map[string]*schemas.Column, error) {
+func (db *xugu) GetColumns(tableName string) ([]string, map[string]*core.Column, error) {
 	args := []interface{}{tableName}
 	s := `
-SELECT   c1.COL_NAME '字段名', c1.NOT_NULL '是否空', c1.TYPE_NAME '字段类型', c1.IS_SERIAL '是否为序列值', c1.COMMENTS '注释',c1.SCALE '数据尺寸' ,con1.DEFINE '约束定义', con1.CONS_TYPE'约束'  
-FROM all_tables t1 
-JOIN all_columns c1   ON  c1.TABLE_ID = t1.TABLE_ID 
-LEFT JOIN   all_constraints con1 ON con1.table_id =  t1.TABLE_ID AND  con1.define  like '%"'||c1.col_name||'"%' 
-WHERE t1.TABLE_NAME = ?;
-`
+SELECT c1.COL_NAME, c1.NOT_NULL, c1.TYPE_NAME, c1.IS_SERIAL, c1.COMMENTS, c1.SCALE, con1.DEFINE, con1.CONS_TYPE
+FROM all_tables t1
+JOIN all_columns c1 ON c1.TABLE_ID = t1.TABLE_ID
+LEFT JOIN all_constraints con1 ON con1.table_id = t1.TABLE_ID AND con1.define like '%"'||c1.col_name||'"%'
+WHERE t1.TABLE_NAME = ?`
 
-	rows, err := queryer.QueryContext(ctx, s, args...)
+	db.LogSQL(s, args)
+	rows, err := db.DB().Query(s, args...)
 	if err != nil {
 		return nil, nil, err
 	}
 	defer rows.Close()
 
-	cols := make(map[string]*schemas.Column)
+	cols := make(map[string]*core.Column)
 	colSeq := make([]string, 0)
 
 	for rows.Next() {
-		col := new(schemas.Column)
+		col := new(core.Column)
 		col.Indexes = make(map[string]int)
 
-		var scale int64
-		var colNaame, typeName string
-		var comment, define, cons_type sql.NullString
-		var notNUll, isSerial bool
+		var scale int
+		var colName, typeName string
+		var comment, define, consType sql.NullString
+		var notNull, isSerial bool
 
-		err = rows.Scan(&colNaame, &notNUll, &typeName, &isSerial, &comment, &scale, &define, &cons_type)
+		err = rows.Scan(&colName, &notNull, &typeName, &isSerial, &comment, &scale, &define, &consType)
 		if err != nil {
 			return nil, nil, err
 		}
-		col.Name = colNaame
+		col.Name = colName
 		col.Comment = comment.String
-		col.Nullable = !notNUll
-
-		col.SQLType = schemas.SQLType{Name: typeName, DefaultLength: int64(scale), DefaultLength2: 0}
-		if cons_type.Valid {
-			switch cons_type.String {
-			case "P":
-				col.IsPrimaryKey = true
-			}
+		col.Nullable = !notNull
+		col.IsAutoIncrement = isSerial
+		col.Length = scale
+		col.SQLType = core.SQLType{Name: typeName, DefaultLength: scale, DefaultLength2: 0}
+		if consType.Valid && consType.String == "P" {
+			col.IsPrimaryKey = true
 		}
 		cols[col.Name] = col
 		colSeq = append(colSeq, col.Name)
 	}
-
-	if rows.Err() != nil {
-		return nil, nil, rows.Err()
-	}
 	return colSeq, cols, nil
 }
 
-func (db *xugu) GetTables(queryer core.Queryer, ctx context.Context) ([]*schemas.Table, error) {
-	sql := `SELECT TABLE_NAME FROM ALL_TABLES`
-	rows, err := queryer.QueryContext(ctx, sql)
+func (db *xugu) GetTables() ([]*core.Table, error) {
+	s := `SELECT TABLE_NAME FROM ALL_TABLES`
+	db.LogSQL(s, nil)
+	rows, err := db.DB().Query(s)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
-	tables := make([]*schemas.Table, 0)
+	tables := make([]*core.Table, 0)
 	for rows.Next() {
-		table := schemas.NewEmptyTable()
+		table := core.NewEmptyTable()
 		var name string
-
-		err = rows.Scan(&name)
-		if err != nil {
+		if err = rows.Scan(&name); err != nil {
 			return nil, err
 		}
-
 		table.Name = name
-
 		tables = append(tables, table)
-	}
-	if rows.Err() != nil {
-		return nil, rows.Err()
 	}
 	return tables, nil
 }
 
-func (db *xugu) SetQuotePolicy(quotePolicy dialects.QuotePolicy) {
-	switch quotePolicy {
-	case dialects.QuotePolicyNone:
-		q := xuguQuoter
-		q.IsReserved = schemas.AlwaysNoReserve
-		db.quoter = q
-	case dialects.QuotePolicyReserved:
-		q := xuguQuoter
-		q.IsReserved = db.IsReserved
-		db.quoter = q
-	case dialects.QuotePolicyAlways:
-		fallthrough
-	default:
-		db.quoter = xuguQuoter
-	}
-}
-
-func (db *xugu) GetIndexes(queryer core.Queryer, ctx context.Context, tableName string) (map[string]*schemas.Index, error) {
-	// ALL_IND_COLUMNS 不是所有虚谷版本都存在。
-	// 索引信息通过 ALL_INDEXES 获取；列信息不可用时的降级策略是返回空 map，
-	// 这比 fail 整个 DBMetas 更安全。
+func (db *xugu) GetIndexes(tableName string) (map[string]*core.Index, error) {
+	// ALL_IND_COLUMNS 不是所有虚谷版本都存在；查询失败时返回空 map，避免中断 DBMetas。
 	args := []interface{}{tableName}
 	s := `SELECT i.INDEX_NAME, i.UNIQUENESS, c.COLUMN_NAME
 		FROM ALL_INDEXES i
@@ -509,30 +300,27 @@ func (db *xugu) GetIndexes(queryer core.Queryer, ctx context.Context, tableName 
 		WHERE t.TABLE_NAME = ? AND i.INDEX_NAME NOT LIKE 'SYS%'
 		ORDER BY c.COLUMN_POSITION`
 
-	rows, err := queryer.QueryContext(ctx, s, args...)
+	db.LogSQL(s, args)
+	rows, err := db.DB().Query(s, args...)
 	if err != nil {
-		// 系统表缺失时返回空索引，不中断 DBMetas 流程
-		return make(map[string]*schemas.Index), nil
+		return make(map[string]*core.Index), nil
 	}
 	defer rows.Close()
 
-	indexes := make(map[string]*schemas.Index)
+	indexes := make(map[string]*core.Index)
 	for rows.Next() {
 		var indexName, uniqueness, colName string
 		if err := rows.Scan(&indexName, &uniqueness, &colName); err != nil {
 			return nil, err
 		}
-
 		indexName = strings.TrimSpace(indexName)
-		var indexType int
+		indexType := core.IndexType
 		if strings.ToUpper(strings.TrimSpace(uniqueness)) == "UNIQUE" {
-			indexType = schemas.UniqueType
-		} else {
-			indexType = schemas.IndexType
+			indexType = core.UniqueType
 		}
 		idx, ok := indexes[indexName]
 		if !ok {
-			idx = new(schemas.Index)
+			idx = new(core.Index)
 			idx.Name = indexName
 			idx.Type = indexType
 			indexes[indexName] = idx
@@ -541,153 +329,88 @@ func (db *xugu) GetIndexes(queryer core.Queryer, ctx context.Context, tableName 
 			idx.AddColumn(colName)
 		}
 	}
-	if rows.Err() != nil {
-		return nil, rows.Err()
-	}
-
 	return indexes, nil
 }
 
-func (db *xugu) ColumnString(d dialects.Dialect, col *schemas.Column, includePrimaryKey bool) (string, error) {
-	bd := strings.Builder{}
+func (db *xugu) columnString(col *core.Column, includeAutoIncr bool) string {
+	var b strings.Builder
+	b.WriteString(db.Quote(col.Name))
+	b.WriteByte(' ')
+	b.WriteString(db.SqlType(col))
 
-	if err := d.Quoter().QuoteTo(&bd, col.Name); err != nil {
-		return "", err
+	if includeAutoIncr && col.IsPrimaryKey && col.IsAutoIncrement {
+		b.WriteByte(' ')
+		b.WriteString(db.AutoIncrStr())
 	}
 
-	if err := bd.WriteByte(' '); err != nil {
-		return "", err
-	}
-
-	if _, err := bd.WriteString(d.SQLType(col)); err != nil {
-		return "", err
-	}
-
-	if includePrimaryKey && col.IsPrimaryKey {
-		if col.IsAutoIncrement {
-			if err := bd.WriteByte(' '); err != nil {
-				return "", err
-			}
-			if _, err := bd.WriteString(d.AutoIncrStr()); err != nil {
-				return "", err
-			}
-		}
-	}
-
-	if !col.DefaultIsEmpty {
-		if _, err := bd.WriteString(" DEFAULT "); err != nil {
-			return "", err
-		}
-		if col.Default == "" {
-			if _, err := bd.WriteString("''"); err != nil {
-				return "", err
-			}
-		} else {
-			if _, err := bd.WriteString(col.Default); err != nil {
-				return "", err
-			}
-		}
+	// go-xorm 0.7 映射后未设默认值时常见 Default=="" && DefaultIsEmpty==false；
+	// 虚谷对 IDENTITY/数值列不允许 DEFAULT ''。
+	if col.Default != "" {
+		b.WriteString(" DEFAULT ")
+		b.WriteString(col.Default)
 	}
 
 	if col.Nullable {
-		if _, err := bd.WriteString(" NULL"); err != nil {
-			return "", err
-		}
+		b.WriteString(" NULL")
 	} else {
-		if _, err := bd.WriteString(" NOT NULL"); err != nil {
-			return "", err
-		}
+		b.WriteString(" NOT NULL")
 	}
-
-	return bd.String(), nil
+	return b.String()
 }
 
-func (db *xugu) CreateTableSQL(ctx context.Context, queryer core.Queryer, table *schemas.Table, tableName string) (string, bool, error) {
+func (db *xugu) CreateTableSql(table *core.Table, tableName, storeEngine, charset string) string {
 	if tableName == "" {
 		tableName = table.Name
 	}
 
-	quoter := db.Quoter()
-	var b strings.Builder
-	if _, err := b.WriteString("CREATE TABLE "); err != nil {
-		return "", false, err
-	}
-	if err := quoter.QuoteTo(&b, tableName); err != nil {
-		return "", false, err
-	}
-	if _, err := b.WriteString(" ("); err != nil {
-		return "", false, err
-	}
-
+	sql := "CREATE TABLE " + db.Quote(tableName) + " ("
 	pkList := table.PrimaryKeys
+	cols := table.ColumnsSeq()
 
-	for i, colName := range table.ColumnsSeq() {
+	for i, colName := range cols {
 		col := table.GetColumn(colName)
-		if col.SQLType.IsBool() && !col.DefaultIsEmpty {
+		if (col.SQLType.Name == core.Bool || col.SQLType.Name == core.Boolean) && !col.DefaultIsEmpty {
 			if col.Default == "true" {
 				col.Default = "1"
 			} else if col.Default == "false" {
 				col.Default = "0"
 			}
 		}
-		s, _ := db.ColumnString(db, col, col.IsPrimaryKey && len(table.PrimaryKeys) == 1)
-		if _, err := b.WriteString(s); err != nil {
-			return "", false, err
+		sql += db.columnString(col, col.IsPrimaryKey && len(pkList) == 1)
+		if len(col.Comment) > 0 {
+			sql += " COMMENT '" + col.Comment + "'"
 		}
-		if i != len(table.ColumnsSeq())-1 {
-			if _, err := b.WriteString(", "); err != nil {
-				return "", false, err
-			}
+		if i != len(cols)-1 {
+			sql += ", "
 		}
 	}
 
 	if len(pkList) > 0 {
-		if len(table.ColumnsSeq()) > 0 {
-			if _, err := b.WriteString(", "); err != nil {
-				return "", false, err
-			}
+		if len(cols) > 0 {
+			sql += ", "
 		}
-		if _, err := b.WriteString("CONSTRAINT PK_"); err != nil {
-			return "", false, err
-		}
-		if _, err := b.WriteString(tableName); err != nil {
-			return "", false, err
-		}
-		if _, err := b.WriteString(" PRIMARY KEY ("); err != nil {
-			return "", false, err
-		}
-		if err := quoter.JoinWrite(&b, pkList, ","); err != nil {
-			return "", false, err
-		}
-		if _, err := b.WriteString(")"); err != nil {
-			return "", false, err
-		}
+		sql += "CONSTRAINT PK_" + tableName + " PRIMARY KEY ("
+		sql += db.Quote(strings.Join(pkList, db.Quote(",")))
+		sql += ")"
 	}
-	if _, err := b.WriteString(")"); err != nil {
-		return "", false, err
-	}
+	sql += ")"
 
-	return b.String(), false, nil
+	if db.rowFormat != "" {
+		sql += " ROW_FORMAT=" + db.rowFormat
+	}
+	_ = storeEngine
+	_ = charset
+	return sql
 }
 
-func (db *xugu) Filters() []dialects.Filter {
-	return []dialects.Filter{}
+func (db *xugu) Filters() []core.Filter {
+	return []core.Filter{}
 }
 
 type xuguDriver struct{}
 
-func (p *xuguDriver) Scan(ctx *dialects.ScanContext, rows *core.Rows, types []*sql.ColumnType, v ...interface{}) error {
-	return rows.Scan(v...)
-}
-
-func (p *xuguDriver) Features() *dialects.DriverFeatures {
-	return &dialects.DriverFeatures{
-		SupportReturnInsertedID: true,
-	}
-}
-
-func (p *xuguDriver) Parse(driverName, dataSourceName string) (*dialects.URI, error) {
-	uri := &dialects.URI{DBType: "xugusql"}
+func (p *xuguDriver) Parse(driverName, dataSourceName string) (*core.Uri, error) {
+	uri := &core.Uri{DbType: "xugusql"}
 	pairs := strings.Split(dataSourceName, ";")
 	for _, pair := range pairs {
 		kv := strings.SplitN(pair, "=", 2)
@@ -695,15 +418,13 @@ func (p *xuguDriver) Parse(driverName, dataSourceName string) (*dialects.URI, er
 			continue
 		}
 		key, value := strings.TrimSpace(kv[0]), strings.Trim(strings.TrimSpace(kv[1]), "'")
-		keyL := strings.ToLower(key)
-
-		switch keyL {
+		switch strings.ToLower(key) {
 		case "ip":
 			uri.Host = value
 		case "port":
 			uri.Port = value
 		case "db":
-			uri.DBName = value
+			uri.DbName = value
 		case "user":
 			uri.User = value
 		case "pwd":
@@ -712,39 +433,5 @@ func (p *xuguDriver) Parse(driverName, dataSourceName string) (*dialects.URI, er
 			uri.Charset = value
 		}
 	}
-
 	return uri, nil
-}
-
-func (p *xuguDriver) GenScanResult(colType string) (interface{}, error) {
-	colType = strings.Replace(colType, "UNSIGNED ", "", -1)
-	switch colType {
-	case "CHAR", "VARCHAR", "TINYTEXT", "TEXT", "MEDIUMTEXT", "LONGTEXT", "ENUM", "SET", "JSON":
-		var s sql.NullString
-		return &s, nil
-	case "BIGINT":
-		var s sql.NullInt64
-		return &s, nil
-	case "TINYINT", "SMALLINT", "MEDIUMINT", "INT":
-		var s sql.NullInt32
-		return &s, nil
-	case "FLOAT", "REAL", "DOUBLE PRECISION", "DOUBLE":
-		var s sql.NullFloat64
-		return &s, nil
-	case "DECIMAL", "NUMERIC":
-		var s sql.NullString
-		return &s, nil
-	case "DATETIME", "TIMESTAMP":
-		var s sql.NullTime
-		return &s, nil
-	case "BIT":
-		var s sql.RawBytes
-		return &s, nil
-	case "BINARY", "VARBINARY", "TINYBLOB", "BLOB", "MEDIUMBLOB", "LONGBLOB":
-		var r sql.RawBytes
-		return &r, nil
-	default:
-		var r sql.RawBytes
-		return &r, nil
-	}
 }
