@@ -3,7 +3,7 @@
 虚谷数据库的 **go-xorm v0.7.0** 方言插件。
 
 > 本分支：`adapt/go-xorm-0.7.0`  
-> 版本建议：`v0.7.0-xugu`  
+> 版本建议：`v0.7.0-goxorm-xugu`  
 > `main` / `v1.3.x-xugu` 面向 `xorm.io/xorm`，与本分支**不通用**。
 
 ---
@@ -26,7 +26,7 @@
 若代码已推送到 GitHub：
 
 ```bash
-go get github.com/Xugu-Open-Source/xugu-xorm@v0.7.0-xugu
+go get github.com/Xugu-Open-Source/xugu-xorm@v0.7.0-goxorm-xugu
 ```
 
 若暂时用本地/内网仓库，在客户 `go.mod` 中：
