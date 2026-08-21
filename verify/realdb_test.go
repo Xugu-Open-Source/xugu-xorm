@@ -196,13 +196,16 @@ func newEngine(t *testing.T) *xorm.Engine {
 	if os.Getenv("XUGU_IT") != "1" {
 		t.Skip("set XUGU_IT=1 and XUGU_TEST_DSN to run real Xugu integration tests")
 	}
+	return newEngineWithDSN(t, os.Getenv("XUGU_TEST_DSN"), "primary privileged")
+}
 
-	testDSN := os.Getenv("XUGU_TEST_DSN")
-	if testDSN == "" {
-		t.Fatal("XUGU_TEST_DSN is required when XUGU_IT=1")
+func newEngineWithDSN(t *testing.T, dsn, role string) *xorm.Engine {
+	t.Helper()
+	if strings.TrimSpace(dsn) == "" {
+		t.Fatalf("DSN for %s is required when XUGU_IT=1", role)
 	}
 
-	engine, err := xorm.NewEngine("xugu", testDSN)
+	engine, err := xorm.NewEngine("xugu", dsn)
 	if err != nil {
 		t.Fatalf("NewEngine failed: %v", err)
 	}
@@ -216,6 +219,138 @@ func newEngine(t *testing.T) *xorm.Engine {
 	}
 	t.Log("REAL_DB_CONNECTED")
 	return engine
+}
+
+type scopePrimary struct {
+	Id          int64  `xorm:"pk autoincr"`
+	PrimaryOnly string `xorm:"varchar(64) notnull index"`
+}
+
+func (scopePrimary) TableName() string { return realDBTableName("scope") }
+
+type scopeSecondary struct {
+	Id            int64  `xorm:"pk autoincr"`
+	SecondaryOnly string `xorm:"varchar(64) notnull unique"`
+}
+
+func (scopeSecondary) TableName() string { return realDBTableName("scope") }
+
+type scopeOrdinary struct {
+	Id           int64  `xorm:"pk autoincr"`
+	OrdinaryOnly string `xorm:"varchar(64) notnull index"`
+}
+
+func (scopeOrdinary) TableName() string { return realDBTableName("scope") }
+
+func currentScope(t *testing.T, engine *xorm.Engine) (string, string) {
+	t.Helper()
+	rows, err := engine.QueryString("SELECT DATABASE(), CURRENT_SCHEMA() FROM DUAL")
+	if err != nil {
+		t.Fatalf("query current database/schema: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("current scope row count = %d, want 1", len(rows))
+	}
+	var values []string
+	for _, value := range rows[0] {
+		values = append(values, value)
+	}
+	if len(values) != 2 {
+		t.Fatalf("current scope column count = %d, want 2", len(values))
+	}
+	return values[0], values[1]
+}
+
+func assertScopeColumns(t *testing.T, engine *xorm.Engine, wanted string, forbidden ...string) {
+	t.Helper()
+	table := testTableMeta(t, engine, realDBTableName("scope"))
+	columns := make(map[string]bool)
+	for _, column := range table.Columns() {
+		columns[strings.ToLower(column.Name)] = true
+	}
+	if !columns[strings.ToLower(wanted)] {
+		t.Fatalf("scope metadata columns %v do not include %q", table.ColumnsSeq(), wanted)
+	}
+	for _, name := range forbidden {
+		if columns[strings.ToLower(name)] {
+			t.Fatalf("scope metadata leaked forbidden column %q: %v", name, table.ColumnsSeq())
+		}
+	}
+}
+
+func TestMetadataScopeTopology(t *testing.T) {
+	if os.Getenv("XUGU_IT") != "1" {
+		t.Skip("set XUGU_IT=1 and all topology inputs to run metadata isolation")
+	}
+
+	primary := newEngineWithDSN(t, os.Getenv("XUGU_TEST_DSN"), "primary privileged")
+	defer primary.Close()
+	secondary := newEngineWithDSN(t, os.Getenv("XUGU_TEST_SECONDARY_DSN"), "secondary database")
+	defer secondary.Close()
+	ordinary := newEngineWithDSN(t, os.Getenv("XUGU_TEST_ORDINARY_DSN"), "ordinary user")
+	defer ordinary.Close()
+
+	primaryDB, primarySchema := currentScope(t, primary)
+	secondaryDB, secondarySchema := currentScope(t, secondary)
+	ordinaryDB, ordinarySchema := currentScope(t, ordinary)
+	if strings.EqualFold(primaryDB, secondaryDB) {
+		t.Fatalf("secondary DSN database %q equals primary database", secondaryDB)
+	}
+	if !strings.EqualFold(primaryDB, ordinaryDB) {
+		t.Fatalf("ordinary DSN database %q differs from primary database %q", ordinaryDB, primaryDB)
+	}
+	if !strings.EqualFold(primarySchema, os.Getenv("XUGU_TEST_PRIMARY_SCHEMA")) {
+		t.Fatalf("primary current schema %q does not match XUGU_TEST_PRIMARY_SCHEMA", primarySchema)
+	}
+	if !strings.EqualFold(ordinarySchema, os.Getenv("XUGU_TEST_SECONDARY_SCHEMA")) {
+		t.Fatalf("ordinary current schema %q does not match XUGU_TEST_SECONDARY_SCHEMA", ordinarySchema)
+	}
+	if strings.EqualFold(primarySchema, ordinarySchema) {
+		t.Fatalf("primary and secondary schemas are both %q", primarySchema)
+	}
+	t.Logf("METADATA_TOPOLOGY primary_db=%q primary_schema=%q secondary_db=%q secondary_schema=%q ordinary_db=%q ordinary_schema=%q", primaryDB, primarySchema, secondaryDB, secondarySchema, ordinaryDB, ordinarySchema)
+
+	fixtures := []struct {
+		engine *xorm.Engine
+		bean   interface{}
+		name   string
+	}{
+		{primary, new(scopePrimary), "primary"},
+		{secondary, new(scopeSecondary), "secondary"},
+		{ordinary, new(scopeOrdinary), "ordinary"},
+	}
+	for _, fixture := range fixtures {
+		if err := fixture.engine.DropTables(fixture.bean); err != nil {
+			t.Fatalf("remove stale %s scope table: %v", fixture.name, err)
+		}
+		if err := fixture.engine.Sync2(fixture.bean); err != nil {
+			t.Fatalf("create %s scope table: %v", fixture.name, err)
+		}
+	}
+	defer func() {
+		for _, fixture := range fixtures {
+			if err := fixture.engine.DropTables(fixture.bean); err != nil {
+				t.Errorf("cleanup %s scope table: %v", fixture.name, err)
+			}
+		}
+	}()
+
+	assertScopeColumns(t, primary, "primary_only", "secondary_only", "ordinary_only")
+	assertScopeColumns(t, secondary, "secondary_only", "primary_only", "ordinary_only")
+	assertScopeColumns(t, ordinary, "ordinary_only", "primary_only", "secondary_only")
+
+	for name, engine := range map[string]*xorm.Engine{"primary": primary, "secondary": secondary, "ordinary": ordinary} {
+		rows, err := engine.QueryString("SELECT VERSION()")
+		if err != nil {
+			t.Fatalf("%s VERSION(): %v", name, err)
+		}
+		if len(rows) != 1 || len(rows[0]) != 1 {
+			t.Fatalf("%s VERSION() result shape = %#v", name, rows)
+		}
+		for _, value := range rows[0] {
+			t.Logf("VERSION_OBSERVATION role=%s raw=%q", name, value)
+		}
+	}
 }
 
 // ============================================================
