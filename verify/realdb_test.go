@@ -3,6 +3,11 @@ package main
 import (
 	"bytes"
 	"context"
+	cryptorand "crypto/rand"
+	"encoding/hex"
+	"fmt"
+	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -10,24 +15,94 @@ import (
 	_ "github.com/Xugu-Open-Source/xugu-xorm"
 	"xorm.io/xorm"
 	"xorm.io/xorm/names"
+	"xorm.io/xorm/schemas"
 )
 
-// 虚谷 Go 驱动的 DSN key 是大小写敏感的：
-// IP / Port / DB / User / PWD（不是小写的 ip/port/db/user/pwd）
-const (
-	testDSN     = "IP=127.0.0.1;Port=5138;DB=SYSTEM;User=SYSDBA;PWD=SYSDBA"
-	testTable   = "xugu_xorm_integration_test"
-	testTable2  = "xugu_xorm_test_composite"
-)
+var realDBTablePrefix string
+
+func TestMain(m *testing.M) {
+	realDBTablePrefix = newRealDBTablePrefix()
+	if os.Getenv("XUGU_IT") == "1" {
+		required := []string{
+			"XUGU_TEST_DSN",
+			"XUGU_TEST_SECONDARY_DSN",
+			"XUGU_TEST_ORDINARY_DSN",
+			"XUGU_TEST_PRIMARY_SCHEMA",
+			"XUGU_TEST_SECONDARY_SCHEMA",
+		}
+		var missing []string
+		for _, name := range required {
+			if strings.TrimSpace(os.Getenv(name)) == "" {
+				missing = append(missing, name)
+			}
+		}
+		if len(missing) > 0 {
+			fmt.Fprintf(os.Stderr, "REAL_DB_BLOCKED: XUGU_IT=1 requires %s\n", strings.Join(missing, ", "))
+			os.Exit(2)
+		}
+	}
+	os.Exit(m.Run())
+}
+
+// newRealDBTablePrefix produces a lowercase identifier-safe prefix shared by
+// one test process. This keeps concurrent or repeated IT runs from touching
+// each other's tables in the same dedicated database or schema.
+func newRealDBTablePrefix() string {
+	var token [6]byte
+	if _, err := cryptorand.Read(token[:]); err == nil {
+		return "xgit_" + hex.EncodeToString(token[:])
+	}
+
+	return fmt.Sprintf("xgit_%x", time.Now().UnixNano())
+}
+
+func realDBTableName(suffix string) string {
+	return realDBTablePrefix + "_" + suffix
+}
 
 // TestUser 测试用结构体
 type TestUser struct {
 	Id        int64     `xorm:"pk autoincr"`
 	Name      string    `xorm:"varchar(100) notnull"`
 	Age       int       `xorm:"int"`
-	Email     string    `xorm:"varchar(255)"`
+	Email     string    `xorm:"varchar(255) index"`
 	Score     float64   `xorm:"decimal(10,2)"`
 	CreatedAt time.Time `xorm:"created"`
+}
+
+func (TestUser) TableName() string {
+	return realDBTableName("users")
+}
+
+// TestUserV2 keeps the same table name to exercise Sync2's incremental
+// add-column path against a table created from the previous model.
+type TestUserV2 struct {
+	Id        int64     `xorm:"pk autoincr"`
+	Name      string    `xorm:"varchar(100) notnull"`
+	Age       int       `xorm:"int"`
+	Email     string    `xorm:"varchar(255) index"`
+	Score     float64   `xorm:"decimal(10,2)"`
+	CreatedAt time.Time `xorm:"created"`
+	Nickname  string    `xorm:"varchar(64)"`
+}
+
+func (TestUserV2) TableName() string {
+	return realDBTableName("users")
+}
+
+// TestUserV3 keeps the same table name while widening Name. The real-database
+// DDL test proves the alteration through a value that does not fit V1.
+type TestUserV3 struct {
+	Id        int64     `xorm:"pk autoincr"`
+	Name      string    `xorm:"varchar(200) notnull"`
+	Age       int       `xorm:"int"`
+	Email     string    `xorm:"varchar(255) index"`
+	Score     float64   `xorm:"decimal(10,2)"`
+	CreatedAt time.Time `xorm:"created"`
+}
+
+func (TestUserV3) TableName() string {
+	return realDBTableName("users")
 }
 
 // TestOrder 复合主键测试
@@ -38,18 +113,108 @@ type TestOrder struct {
 	Remark   string `xorm:"varchar(500)"`
 }
 
+func (TestOrder) TableName() string {
+	return realDBTableName("orders")
+}
+
+// TestDefaultValue exercises the xorm default tag and the Xugu metadata
+// reader. The insert explicitly omits Status so the server evaluates the DDL
+// default instead of receiving Go's zero-value empty string.
+type TestDefaultValue struct {
+	Id     int64  `xorm:"pk autoincr"`
+	Name   string `xorm:"varchar(64) notnull"`
+	Status string `xorm:"varchar(16) notnull default 'pending'"`
+}
+
+func (TestDefaultValue) TableName() string {
+	return realDBTableName("defaults")
+}
+
+func testUserTableMeta(t *testing.T, engine *xorm.Engine) *schemas.Table {
+	return testTableMeta(t, engine, new(TestUser).TableName())
+}
+
+func testTableMeta(t *testing.T, engine *xorm.Engine, want string) *schemas.Table {
+	t.Helper()
+	tables, err := engine.DBMetas()
+	if err != nil {
+		t.Fatalf("DBMetas failed: %v", err)
+	}
+
+	for _, table := range tables {
+		if strings.EqualFold(table.Name, want) {
+			return table
+		}
+	}
+	t.Fatalf("DBMetas did not include test table %q", want)
+	return nil
+}
+
+func TestDefaultValueMetadataAndWriteRead(t *testing.T) {
+	engine := newEngine(t)
+	defer engine.Close()
+
+	_ = engine.DropTables(&TestDefaultValue{})
+	if err := engine.Sync2(new(TestDefaultValue)); err != nil {
+		t.Fatalf("create default-value fixture: %v", err)
+	}
+	defer engine.DropTables(&TestDefaultValue{})
+
+	table := testTableMeta(t, engine, new(TestDefaultValue).TableName())
+	var status *schemas.Column
+	for _, column := range table.Columns() {
+		if strings.EqualFold(column.Name, "status") {
+			status = column
+			break
+		}
+	}
+	if status == nil {
+		t.Fatalf("default-value fixture metadata is missing status column")
+	}
+	if status.DefaultIsEmpty || strings.Trim(strings.TrimSpace(status.Default), "'") != "pending" {
+		t.Fatalf("status default metadata = %q (empty=%v), want pending", status.Default, status.DefaultIsEmpty)
+	}
+
+	row := &TestDefaultValue{Name: "default-write"}
+	if _, err := engine.Omit("status").Insert(row); err != nil {
+		t.Fatalf("insert row omitting default status: %v", err)
+	}
+
+	var got TestDefaultValue
+	has, err := engine.ID(row.Id).Get(&got)
+	if err != nil {
+		t.Fatalf("read default-value row: %v", err)
+	}
+	if !has || got.Status != "pending" {
+		t.Fatalf("default-value read-back = %+v (has=%v), want status pending", got, has)
+	}
+}
+
 // newEngine 创建已连接的 xorm Engine
 func newEngine(t *testing.T) *xorm.Engine {
 	t.Helper()
+	if os.Getenv("XUGU_IT") != "1" {
+		t.Skip("set XUGU_IT=1 and XUGU_TEST_DSN to run real Xugu integration tests")
+	}
+
+	testDSN := os.Getenv("XUGU_TEST_DSN")
+	if testDSN == "" {
+		t.Fatal("XUGU_TEST_DSN is required when XUGU_IT=1")
+	}
+
 	engine, err := xorm.NewEngine("xugu", testDSN)
 	if err != nil {
 		t.Fatalf("NewEngine failed: %v", err)
 	}
 	engine.SetMapper(names.GonicMapper{})
+	if os.Getenv("XUGU_IT_SQL") == "1" {
+		engine.ShowSQL(true)
+	}
 	if err := engine.Ping(); err != nil {
 		engine.Close()
 		t.Fatalf("Ping failed: %v", err)
 	}
+	t.Log("REAL_DB_CONNECTED")
 	return engine
 }
 
@@ -93,27 +258,8 @@ func TestDBMetas_GetTables(t *testing.T) {
 	}
 	defer engine.DropTables(&TestUser{})
 
-	tables, err := engine.DBMetas()
-	if err != nil {
-		t.Fatalf("DBMetas failed: %v", err)
-	}
-	if len(tables) == 0 {
-		t.Fatal("DBMetas 返回 0 张表——GetTables 可能未正确实现")
-	}
-	t.Logf("✅ 发现 %d 张表", len(tables))
-
-	// 至少 SYSTEM schema 有表
-	found := false
-	for _, tb := range tables {
-		if tb.Name != "" {
-			found = true
-			t.Logf("   - %s (columns=%d)", tb.Name, len(tb.Columns()))
-			break
-		}
-	}
-	if !found {
-		t.Error("所有表名为空——GetTables 结果异常")
-	}
+	table := testUserTableMeta(t, engine)
+	t.Logf("✅ DBMetas found test table %s (columns=%d)", table.Name, len(table.Columns()))
 }
 
 func TestDBMetas_GetColumns(t *testing.T) {
@@ -127,49 +273,46 @@ func TestDBMetas_GetColumns(t *testing.T) {
 	}
 	defer engine.DropTables(&TestUser{})
 
-	tables, err := engine.DBMetas()
-	if err != nil {
-		t.Fatalf("DBMetas failed: %v", err)
+	table := testUserTableMeta(t, engine)
+	expectedColumns := []string{"id", "name", "age", "email", "score", "created_at"}
+	columns := make(map[string]*schemas.Column, len(table.Columns()))
+	for _, column := range table.Columns() {
+		columns[strings.ToLower(column.Name)] = column
+		t.Logf("   - %s (type=%s, nullable=%v, pk=%v)", column.Name, column.SQLType.Name, column.Nullable, column.IsPrimaryKey)
 	}
-
-	// 随便选一张有列的表验证 GetColumns
-	var target *TestUser // just for reflection
-	_ = target
-
-	for _, tb := range tables {
-		cols := tb.Columns()
-		if len(cols) > 0 {
-			t.Logf("✅ 表 %s 有 %d 列", tb.Name, len(cols))
-			for _, col := range cols {
-				t.Logf("   - %s (type=%s, nullable=%v, pk=%v)", col.Name, col.SQLType.Name, col.Nullable, col.IsPrimaryKey)
-			}
-			return
+	for _, name := range expectedColumns {
+		if columns[name] == nil {
+			t.Errorf("test table %s is missing expected column %q; got %v", table.Name, name, table.ColumnsSeq())
 		}
 	}
-	t.Error("所有表都没有列——GetColumns 可能未正确实现")
+	if id := columns["id"]; id != nil && !id.IsPrimaryKey {
+		t.Errorf("test table %s column id is not reported as a primary key", table.Name)
+	}
+	if name := columns["name"]; name != nil && name.Nullable {
+		t.Errorf("test table %s column name is reported nullable despite the notnull tag", table.Name)
+	}
 }
 
 func TestDBMetas_GetIndexes(t *testing.T) {
 	engine := newEngine(t)
 	defer engine.Close()
 
-	tables, err := engine.DBMetas()
-	if err != nil {
-		t.Fatalf("DBMetas failed: %v", err)
+	_ = engine.DropTables(&TestUser{})
+	if err := engine.Sync2(new(TestUser)); err != nil {
+		t.Fatalf("建表失败: %v", err)
 	}
+	defer engine.DropTables(&TestUser{})
 
-	for _, tb := range tables {
-		indexes := tb.Indexes
-		// 系统表不一定有索引，但这个调用至少不 panic / 不返回 error
-		t.Logf("表 %s: %d 个索引", tb.Name, len(indexes))
-		if len(indexes) > 0 {
-			for _, idx := range indexes {
-				t.Logf("   - %s (cols=%v, type=%d)", idx.Name, idx.Cols, idx.Type)
+	table := testUserTableMeta(t, engine)
+	for _, index := range table.Indexes {
+		t.Logf("   - %s (cols=%v, type=%d)", index.Name, index.Cols, index.Type)
+		for _, column := range index.Cols {
+			if strings.EqualFold(column, "email") {
+				return
 			}
-			return
 		}
 	}
-	t.Log("✅ GetIndexes 调用成功（系统表可能无用户索引）")
+	t.Errorf("test table %s is missing the declared email index", table.Name)
 }
 
 // ============================================================
@@ -274,10 +417,13 @@ func TestCRUD_FullFlow(t *testing.T) {
 	if !has {
 		t.Fatal("Get(id) 未找到已插入的记录")
 	}
-	if found.Name != "张三" || found.Age != 28 {
-		t.Errorf("数据不一致: name=%s, age=%d", found.Name, found.Age)
+	if found.Name != "张三" || found.Age != 28 || found.Score != 95.50 {
+		t.Errorf("数据不一致: name=%s, age=%d, score=%v", found.Name, found.Age, found.Score)
 	}
-	t.Logf("✅ Get(id) 成功: name=%s, age=%d", found.Name, found.Age)
+	if found.CreatedAt.IsZero() {
+		t.Error("Get(id) 读回的 CreatedAt 为空")
+	}
+	t.Logf("✅ Get(id) 成功: name=%s, age=%d, score=%v, created_at=%s", found.Name, found.Age, found.Score, found.CreatedAt)
 
 	// === Find (多条件) ===
 	var users []TestUser
@@ -370,6 +516,142 @@ func TestTransaction(t *testing.T) {
 	t.Log("✅ 事务 Rollback 验证通过")
 }
 
+func TestTransactionCommit(t *testing.T) {
+	engine := newEngine(t)
+	defer engine.Close()
+
+	_ = engine.DropTables(&TestUser{})
+	if err := engine.Sync2(new(TestUser)); err != nil {
+		t.Fatalf("建表失败: %v", err)
+	}
+	defer engine.DropTables(&TestUser{})
+
+	session := engine.NewSession()
+	defer session.Close()
+	if err := session.Begin(); err != nil {
+		t.Fatalf("Begin 失败: %v", err)
+	}
+	if _, err := session.Insert(&TestUser{Name: "提交测试", Age: 26}); err != nil {
+		_ = session.Rollback()
+		t.Fatalf("事务 Insert 失败: %v", err)
+	}
+	if err := session.Commit(); err != nil {
+		t.Fatalf("Commit 失败: %v", err)
+	}
+
+	count, err := engine.Count(&TestUser{})
+	if err != nil {
+		t.Fatalf("Count 失败: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("Commit 后期望 1 条记录，实际 %d", count)
+	}
+}
+
+func TestQueryPaginationAndCount(t *testing.T) {
+	engine := newEngine(t)
+	defer engine.Close()
+
+	_ = engine.DropTables(&TestUser{})
+	if err := engine.Sync2(new(TestUser)); err != nil {
+		t.Fatalf("建表失败: %v", err)
+	}
+	defer engine.DropTables(&TestUser{})
+
+	users := []TestUser{
+		{Name: "alpha", Age: 20},
+		{Name: "beta", Age: 21},
+		{Name: "gamma", Age: 22},
+		{Name: "delta", Age: 23},
+	}
+	if affected, err := engine.Insert(&users); err != nil || affected != int64(len(users)) {
+		t.Fatalf("批量 Insert: affected=%d err=%v", affected, err)
+	}
+
+	count, err := engine.Where("age >= ?", 20).Count(&TestUser{})
+	if err != nil {
+		t.Fatalf("Count 失败: %v", err)
+	}
+	if count != int64(len(users)) {
+		t.Fatalf("Count 期望 %d，实际 %d", len(users), count)
+	}
+
+	var page []TestUser
+	if err := engine.Where("age >= ?", 20).Asc("id").Limit(2, 1).Find(&page); err != nil {
+		t.Fatalf("分页 Find 失败: %v", err)
+	}
+	if len(page) != 2 || page[0].Name != "beta" || page[1].Name != "gamma" {
+		t.Fatalf("分页结果异常: %+v", page)
+	}
+}
+
+func TestSync2AddColumn(t *testing.T) {
+	engine := newEngine(t)
+	defer engine.Close()
+
+	_ = engine.DropTables(&TestUser{})
+	if err := engine.Sync2(new(TestUser)); err != nil {
+		t.Fatalf("初始建表失败: %v", err)
+	}
+	defer engine.DropTables(&TestUser{})
+
+	if err := engine.Sync2(new(TestUserV2)); err != nil {
+		t.Fatalf("增量 Sync2 加列失败: %v", err)
+	}
+
+	user := &TestUserV2{Name: "增量字段", Age: 30, Nickname: "nick"}
+	if _, err := engine.Insert(user); err != nil {
+		t.Fatalf("写入新增列失败: %v", err)
+	}
+
+	var found TestUserV2
+	has, err := engine.Where("nickname = ?", "nick").Get(&found)
+	if err != nil {
+		t.Fatalf("查询新增列失败: %v", err)
+	}
+	if !has || found.Nickname != "nick" {
+		t.Fatalf("新增列读回异常: has=%v user=%+v", has, found)
+	}
+}
+
+func TestModifyColumn(t *testing.T) {
+	engine := newEngine(t)
+	defer engine.Close()
+
+	_ = engine.DropTables(&TestUser{})
+	if err := engine.Sync2(new(TestUser)); err != nil {
+		t.Fatalf("初始建表失败: %v", err)
+	}
+	defer engine.DropTables(&TestUser{})
+
+	column := &schemas.Column{
+		Name:           "name",
+		SQLType:        schemas.SQLType{Name: schemas.Varchar},
+		Length:         200,
+		Nullable:       false,
+		DefaultIsEmpty: true,
+	}
+	modifySQL := engine.Dialect().ModifyColumnSQL(new(TestUser).TableName(), column)
+	if _, err := engine.Exec(modifySQL); err != nil {
+		t.Fatalf("改列失败: %v", err)
+	}
+
+	longName := strings.Repeat("n", 150)
+	user := &TestUserV3{Name: longName, Age: 30}
+	if _, err := engine.Insert(user); err != nil {
+		t.Fatalf("写入加宽列失败: %v", err)
+	}
+
+	var found TestUserV3
+	has, err := engine.ID(user.Id).Get(&found)
+	if err != nil {
+		t.Fatalf("读取加宽列失败: %v", err)
+	}
+	if !has || found.Name != longName {
+		t.Fatalf("改列后读回异常: has=%v name length=%d", has, len(found.Name))
+	}
+}
+
 // ============================================================
 // 7. 原生 SQL
 // ============================================================
@@ -390,6 +672,15 @@ func TestRawSQL(t *testing.T) {
 		t.Errorf("期望 ONE=1, 实际=%s", results[0]["ONE"])
 	}
 	t.Log("✅ 原生 SQL 执行成功")
+}
+
+func TestInvalidSQLReturnsError(t *testing.T) {
+	engine := newEngine(t)
+	defer engine.Close()
+
+	if _, err := engine.Exec("SELECT 1 FROM"); err == nil {
+		t.Fatal("执行无效 SQL 未返回错误")
+	}
 }
 
 // ============================================================

@@ -6,11 +6,18 @@ package xugu_test
 
 import (
 	"context"
+	"database/sql"
+	"database/sql/driver"
+	"errors"
+	"fmt"
+	"io"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	_ "github.com/Xugu-Open-Source/xugu-xorm" // blank import triggers init() registration
+	"xorm.io/xorm/core"
 	"xorm.io/xorm/dialects"
 	"xorm.io/xorm/schemas"
 
@@ -42,6 +49,82 @@ func newXuguDriver(t *testing.T) dialects.Driver {
 	return driver
 }
 
+type queryerFunc func(context.Context, string, ...interface{}) (*core.Rows, error)
+
+func (f queryerFunc) QueryContext(ctx context.Context, query string, args ...interface{}) (*core.Rows, error) {
+	return f(ctx, query, args...)
+}
+
+type versionRowsDriver struct {
+	columns []string
+	rows    [][]driver.Value
+}
+
+func (d versionRowsDriver) Open(string) (driver.Conn, error) {
+	return &versionRowsConn{columns: d.columns, rows: d.rows}, nil
+}
+
+type versionRowsConn struct {
+	columns []string
+	rows    [][]driver.Value
+}
+
+func (*versionRowsConn) Prepare(string) (driver.Stmt, error) {
+	return nil, errors.New("Prepare is not supported by this test driver")
+}
+
+func (*versionRowsConn) Close() error {
+	return nil
+}
+
+func (*versionRowsConn) Begin() (driver.Tx, error) {
+	return nil, errors.New("Begin is not supported by this test driver")
+}
+
+func (c *versionRowsConn) QueryContext(context.Context, string, []driver.NamedValue) (driver.Rows, error) {
+	return &versionRows{columns: c.columns, rows: c.rows}, nil
+}
+
+type versionRows struct {
+	columns []string
+	rows    [][]driver.Value
+	pos     int
+}
+
+func (r *versionRows) Columns() []string {
+	return r.columns
+}
+
+func (*versionRows) Close() error {
+	return nil
+}
+
+func (r *versionRows) Next(dest []driver.Value) error {
+	if r.pos >= len(r.rows) {
+		return io.EOF
+	}
+
+	copy(dest, r.rows[r.pos])
+	r.pos++
+	return nil
+}
+
+var versionRowsDriverID uint64
+
+func newVersionQueryer(t *testing.T, rows ...[]driver.Value) core.Queryer {
+	return newRowsQueryer(t, []string{"VERSION"}, rows...)
+}
+
+func newRowsQueryer(t *testing.T, columns []string, rows ...[]driver.Value) core.Queryer {
+	t.Helper()
+	driverName := fmt.Sprintf("xugu-version-rows-%d", atomic.AddUint64(&versionRowsDriverID, 1))
+	sql.Register(driverName, versionRowsDriver{columns: columns, rows: rows})
+	db, err := sql.Open(driverName, "")
+	assert.NoError(t, err)
+	t.Cleanup(func() { assert.NoError(t, db.Close()) })
+	return core.FromDB(db)
+}
+
 // ============================================================================
 // Layer 1: Driver-level tests (Parse + GenScanResult)
 // ============================================================================
@@ -52,8 +135,8 @@ func TestParseXuguDSN(t *testing.T) {
 		expected *dialects.URI
 	}{
 		{
-			in:       "ip=192.168.1.100;port=5138;db=mydb;user=admin;pwd=secret;char_set=utf8",
-			expected: &dialects.URI{DBType: "xugusql", Host: "192.168.1.100", Port: "5138", DBName: "mydb", User: "admin", Passwd: "secret", Charset: "utf8"},
+			in:       "ip=192.0.2.10;port=5138;db=mydb;user=test_user;pwd=example_password;char_set=utf8",
+			expected: &dialects.URI{DBType: "xugusql", Host: "192.0.2.10", Port: "5138", DBName: "mydb", User: "test_user", Passwd: "example_password", Charset: "utf8"},
 		},
 		{
 			in:       "ip=127.0.0.1;port=5138;db=test",
@@ -100,6 +183,20 @@ func TestParseXuguDSN(t *testing.T) {
 			assert.Equal(t, tt.expected.Charset, uri.Charset)
 		})
 	}
+}
+
+func TestParseXuguMalformedDSN(t *testing.T) {
+	driver := newXuguDriver(t)
+
+	// The driver parser is intentionally permissive: malformed segments are
+	// ignored and validation remains the responsibility of the Xugu driver
+	// when a connection is opened. The important dialect contract is that
+	// malformed input cannot panic or fabricate connection fields.
+	uri, err := driver.Parse("xugu", "ip=localhost;not-a-pair;db;=missing-key")
+	assert.NoError(t, err)
+	assert.Equal(t, "xugusql", string(uri.DBType))
+	assert.Equal(t, "localhost", uri.Host)
+	assert.Empty(t, uri.DBName)
 }
 
 func TestXuguGenScanResult(t *testing.T) {
@@ -347,11 +444,11 @@ func TestXuguCreateTableSQL(t *testing.T) {
 					DefaultIsEmpty:  true,
 				})
 				table.AddColumn(&schemas.Column{
-					Name:            "name",
-					SQLType:         schemas.SQLType{Name: schemas.Varchar},
-					Length:          200,
-					Nullable:        false,
-					DefaultIsEmpty:  true,
+					Name:           "name",
+					SQLType:        schemas.SQLType{Name: schemas.Varchar},
+					Length:         200,
+					Nullable:       false,
+					DefaultIsEmpty: true,
 				})
 				table.PrimaryKeys = []string{"id"}
 				return table
@@ -368,24 +465,24 @@ func TestXuguCreateTableSQL(t *testing.T) {
 			setup: func() *schemas.Table {
 				table := schemas.NewTable("order_items", nil)
 				table.AddColumn(&schemas.Column{
-					Name:            "order_id",
-					SQLType:         schemas.SQLType{Name: schemas.Int},
-					IsPrimaryKey:    true,
-					Nullable:        false,
-					DefaultIsEmpty:  true,
+					Name:           "order_id",
+					SQLType:        schemas.SQLType{Name: schemas.Int},
+					IsPrimaryKey:   true,
+					Nullable:       false,
+					DefaultIsEmpty: true,
 				})
 				table.AddColumn(&schemas.Column{
-					Name:            "item_id",
-					SQLType:         schemas.SQLType{Name: schemas.Int},
-					IsPrimaryKey:    true,
-					Nullable:        false,
-					DefaultIsEmpty:  true,
+					Name:           "item_id",
+					SQLType:        schemas.SQLType{Name: schemas.Int},
+					IsPrimaryKey:   true,
+					Nullable:       false,
+					DefaultIsEmpty: true,
 				})
 				table.AddColumn(&schemas.Column{
-					Name:            "quantity",
-					SQLType:         schemas.SQLType{Name: schemas.Int},
-					Nullable:        false,
-					DefaultIsEmpty:  true,
+					Name:           "quantity",
+					SQLType:        schemas.SQLType{Name: schemas.Int},
+					Nullable:       false,
+					DefaultIsEmpty: true,
 				})
 				table.PrimaryKeys = []string{"order_id", "item_id"}
 				return table
@@ -452,6 +549,54 @@ func TestXuguIndexCheckSQL(t *testing.T) {
 	assert.Contains(t, sql, "ALL_INDEXES")
 	assert.Contains(t, strings.ToUpper(sql), "ALL_TABLES")
 	assert.Equal(t, []interface{}{"users", "idx_name"}, args)
+}
+
+func assertMetadataScopeSQL(t *testing.T, query string) {
+	t.Helper()
+	upper := strings.ToUpper(query)
+	for _, fragment := range []string{
+		"WITH CURRENT_SCOPE AS",
+		"ALL_DATABASES",
+		"ALL_SCHEMAS",
+		"DATABASE()",
+		"CURRENT_SCHEMA()",
+	} {
+		assert.Contains(t, upper, fragment)
+	}
+}
+
+func TestXuguMetadataQueriesUseCurrentScope(t *testing.T) {
+	d := newXuguDialectInit(t, "ignored-dsn-db")
+
+	indexSQL, _ := d.IndexCheckSQL("users", "idx_users")
+	assertMetadataScopeSQL(t, indexSQL)
+	assert.Contains(t, strings.ToUpper(indexSQL), "I.DB_ID = T.DB_ID")
+	assert.Contains(t, strings.ToUpper(indexSQL), "I.TABLE_ID = T.TABLE_ID")
+
+	queries := make(map[string]string)
+	capture := func(name string, columns []string, rows ...[]driver.Value) core.Queryer {
+		queryer := newRowsQueryer(t, columns, rows...)
+		return queryerFunc(func(ctx context.Context, query string, args ...interface{}) (*core.Rows, error) {
+			queries[name] = query
+			return queryer.QueryContext(ctx, query, args...)
+		})
+	}
+
+	_, err := d.IsTableExist(capture("exist", []string{"TABLE_NAME"}), context.Background(), "users")
+	assert.NoError(t, err)
+	_, err = d.GetTables(capture("tables", []string{"TABLE_NAME"}), context.Background())
+	assert.NoError(t, err)
+	_, _, err = d.GetColumns(capture("columns", []string{"COL_NAME", "NOT_NULL", "TYPE_NAME", "IS_SERIAL", "COMMENTS", "SCALE", "DEF_VAL", "DEFINE", "CONS_TYPE"}), context.Background(), "users")
+	assert.NoError(t, err)
+	_, err = d.GetIndexes(capture("indexes", []string{"INDEX_NAME", "KEYS", "IS_UNIQUE", "IS_PRIMARY"}), context.Background(), "users")
+	assert.NoError(t, err)
+
+	for name, query := range queries {
+		t.Run(name, func(t *testing.T) { assertMetadataScopeSQL(t, query) })
+	}
+	assert.Contains(t, strings.ToUpper(queries["columns"]), "C1.DB_ID = T1.DB_ID")
+	assert.Contains(t, strings.ToUpper(queries["columns"]), "CON1.DB_ID = T1.DB_ID")
+	assert.Contains(t, strings.ToUpper(queries["indexes"]), "I.DB_ID = T.DB_ID")
 }
 
 func TestXuguAddColumnSQL(t *testing.T) {
@@ -535,6 +680,8 @@ func TestXuguAlias(t *testing.T) {
 		{"numeric", "decimal"},
 		{"NUMERIC", "decimal"},
 		{"Numeric", "decimal"},
+		{"char", "varchar"},
+		{"INTEGER", "int"},
 		{"varchar", "varchar"},
 		{"int", "int"},
 		{"decimal", "decimal"},
@@ -821,4 +968,193 @@ func TestXuguNullableLogic(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Contains(t, sql2, "NULL")
 	assert.NotContains(t, sql2, "NOT NULL")
+}
+
+func TestXuguVersion(t *testing.T) {
+	d := newXuguDialectInit(t, "test")
+
+	t.Run("query error", func(t *testing.T) {
+		expected := errors.New("version query failed")
+		_, err := d.Version(context.Background(), queryerFunc(func(context.Context, string, ...interface{}) (*core.Rows, error) {
+			return nil, expected
+		}))
+		assert.Equal(t, expected, err)
+	})
+
+	tests := []struct {
+		name        string
+		rows        [][]driver.Value
+		wantNumber  string
+		wantEdition string
+		wantErr     bool
+		wantErrText string
+	}{
+		{
+			name:        "empty result",
+			wantErr:     true,
+			wantErrText: "unknown version",
+		},
+		{
+			name:        "single version token",
+			rows:        [][]driver.Value{{"1.3.6"}},
+			wantNumber:  "1.3.6",
+			wantEdition: "",
+		},
+		{
+			name:        "edition and version",
+			rows:        [][]driver.Value{{"Xugu 1.3.6"}},
+			wantNumber:  "1.3.6",
+			wantEdition: "Xugu",
+		},
+		{
+			name:        "XuguDB observed version",
+			rows:        [][]driver.Value{{"XuguDB 12.0.0"}},
+			wantNumber:  "12.0.0",
+			wantEdition: "XuguDB",
+		},
+		{
+			name:        "build suffix",
+			rows:        [][]driver.Value{{"  XuguDB 12.10.13 build xxx  "}},
+			wantNumber:  "12.10.13",
+			wantEdition: "XuguDB",
+		},
+		{
+			name:        "multi word edition",
+			rows:        [][]driver.Value{{"Xugu Enterprise 1.3.6"}},
+			wantNumber:  "1.3.6",
+			wantEdition: "Xugu Enterprise",
+		},
+		{
+			name:        "blank version",
+			rows:        [][]driver.Value{{"   "}},
+			wantErr:     true,
+			wantErrText: "unknown version",
+		},
+		{
+			name:        "error response",
+			rows:        [][]driver.Value{{"ERROR"}},
+			wantErr:     true,
+			wantErrText: "unrecognized Xugu version response",
+		},
+		{
+			name:        "edition error response",
+			rows:        [][]driver.Value{{"Xugu ERROR"}},
+			wantErr:     true,
+			wantErrText: "unrecognized Xugu version response",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			version, err := d.Version(context.Background(), newVersionQueryer(t, tt.rows...))
+			if tt.wantErr {
+				assert.Error(t, err)
+				assert.Nil(t, version)
+				if tt.wantErrText != "" {
+					assert.Contains(t, err.Error(), tt.wantErrText)
+				}
+				return
+			}
+
+			assert.NoError(t, err)
+			assert.Equal(t, tt.wantNumber, version.Number)
+			assert.Equal(t, tt.wantEdition, version.Edition)
+		})
+	}
+}
+
+func TestXuguGetIndexesPropagatesQueryError(t *testing.T) {
+	d := newXuguDialectInit(t, "test")
+	expected := errors.New("ALL_IND_COLUMNS is unavailable")
+
+	indexes, err := d.GetIndexes(queryerFunc(func(context.Context, string, ...interface{}) (*core.Rows, error) {
+		return nil, expected
+	}), context.Background(), "users")
+
+	assert.Equal(t, expected, err)
+	assert.Nil(t, indexes)
+}
+
+func TestXuguGetIndexes(t *testing.T) {
+	d := newXuguDialectInit(t, "test")
+	var query string
+	queryer := newRowsQueryer(t,
+		[]string{"INDEX_NAME", "KEYS", "IS_UNIQUE", "IS_PRIMARY"},
+		[]driver.Value{"PK_USERS", `"ID"`, "true", "true"},
+		[]driver.Value{"IDX_USERS_EMAIL", ` "EMAIL" , "DISPLAY,NAME" , "A""B" `, "true", "false"},
+		[]driver.Value{"IDX_USERS_AGE", `"AGE"`, "false", "false"},
+	)
+	indexes, err := d.GetIndexes(queryerFunc(func(ctx context.Context, sql string, args ...interface{}) (*core.Rows, error) {
+		query = sql
+		return queryer.QueryContext(ctx, sql, args...)
+	}), context.Background(), "users")
+
+	assert.NoError(t, err)
+	assertMetadataScopeSQL(t, query)
+	assert.Equal(t, schemas.UniqueType, indexes["IDX_USERS_EMAIL"].Type)
+	assert.Equal(t, []string{"EMAIL", "DISPLAY,NAME", `A"B`}, indexes["IDX_USERS_EMAIL"].Cols)
+	assert.Equal(t, schemas.IndexType, indexes["IDX_USERS_AGE"].Type)
+	assert.Equal(t, []string{"AGE"}, indexes["IDX_USERS_AGE"].Cols)
+	assert.NotContains(t, indexes, "PK_USERS")
+}
+
+func TestXuguGetIndexesRejectsUnsupportedKeys(t *testing.T) {
+	d := newXuguDialectInit(t, "test")
+	for _, keys := range []string{"LOWER(NAME)", `"NAME" DESC`, `"unterminated`, ""} {
+		t.Run(keys, func(t *testing.T) {
+			indexes, err := d.GetIndexes(newRowsQueryer(t,
+				[]string{"INDEX_NAME", "KEYS", "IS_UNIQUE", "IS_PRIMARY"},
+				[]driver.Value{"IDX_BAD", keys, "false", "false"},
+			), context.Background(), "users")
+			assert.Error(t, err)
+			assert.Nil(t, indexes)
+			assert.Contains(t, err.Error(), "parse index")
+		})
+	}
+}
+
+func TestXuguGetColumns(t *testing.T) {
+	d := newXuguDialectInit(t, "test")
+	var query string
+	queryer := newRowsQueryer(t,
+		[]string{"COL_NAME", "NOT_NULL", "TYPE_NAME", "IS_SERIAL", "COMMENTS", "SCALE", "DEF_VAL", "CONSTRAINT_DEFINE", "CONS_TYPE"},
+		[]driver.Value{"ID", true, "INT", true, "identifier", int64(0), nil, "PRIMARY KEY", "P"},
+		[]driver.Value{"NAME", false, "VARCHAR", false, nil, int64(255), "'anonymous'", nil, nil},
+	)
+	columns, definitions, err := d.GetColumns(queryerFunc(func(ctx context.Context, sql string, args ...interface{}) (*core.Rows, error) {
+		query = sql
+		return queryer.QueryContext(ctx, sql, args...)
+	}), context.Background(), "users")
+
+	assert.NoError(t, err)
+	assertMetadataScopeSQL(t, query)
+	assert.Contains(t, strings.ToUpper(query), "C1.DB_ID = T1.DB_ID")
+	assert.Contains(t, strings.ToUpper(query), "CON1.DB_ID = T1.DB_ID")
+	assert.Contains(t, query, "c1.DEF_VAL")
+	assert.NotContains(t, query, "c1.DEFINE")
+	assert.NotContains(t, query, "DEFAULT_VALUE")
+	assert.Equal(t, []string{"ID", "NAME"}, columns)
+	assert.True(t, definitions["ID"].IsPrimaryKey)
+	assert.True(t, definitions["ID"].IsAutoIncrement)
+	assert.False(t, definitions["ID"].Nullable)
+	assert.Equal(t, "identifier", definitions["ID"].Comment)
+	assert.True(t, definitions["ID"].DefaultIsEmpty)
+	assert.Empty(t, definitions["ID"].Default)
+	assert.True(t, definitions["NAME"].Nullable)
+	assert.Equal(t, int64(255), definitions["NAME"].SQLType.DefaultLength)
+	assert.False(t, definitions["NAME"].DefaultIsEmpty)
+	assert.Equal(t, "'anonymous'", definitions["NAME"].Default)
+}
+
+func TestXuguGetColumnsPropagatesQueryError(t *testing.T) {
+	d := newXuguDialectInit(t, "test")
+	expected := errors.New("ALL_COLUMNS is unavailable")
+
+	columns, definitions, err := d.GetColumns(queryerFunc(func(context.Context, string, ...interface{}) (*core.Rows, error) {
+		return nil, expected
+	}), context.Background(), "users")
+
+	assert.Equal(t, expected, err)
+	assert.Nil(t, columns)
+	assert.Nil(t, definitions)
 }

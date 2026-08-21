@@ -179,16 +179,16 @@ func TestDSNParsing(t *testing.T) {
 	drv := getDriver(t)
 
 	tests := []struct {
-		name     string
-		dsn      string
-		host     string
-		port     string
-		db       string
-		user     string
-		charset  string
+		name    string
+		dsn     string
+		host    string
+		port    string
+		db      string
+		user    string
+		charset string
 	}{
-		{"完整 DSN", "ip=192.168.1.100;port=5138;db=SYSTEM;user=SYSDBA;pwd=SYSDBA;char_set=utf8", "192.168.1.100", "5138", "SYSTEM", "SYSDBA", "utf8"},
-		{"带单引号", "ip='127.0.0.1';port='5138';db='testdb';user='admin';pwd='secret'", "127.0.0.1", "5138", "testdb", "admin", ""},
+		{"完整 DSN", "ip=192.0.2.10;port=5138;db=testdb;user=test_user;pwd=example_password;char_set=utf8", "192.0.2.10", "5138", "testdb", "test_user", "utf8"},
+		{"带单引号", "ip='127.0.0.1';port='5138';db='testdb';user='test_user';pwd='example_password'", "127.0.0.1", "5138", "testdb", "test_user", ""},
 		{"仅必需", "ip=10.0.0.1;port=5159;db=mydb;user=sa", "10.0.0.1", "5159", "mydb", "sa", ""},
 	}
 

@@ -9,6 +9,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -25,6 +26,8 @@ func init() {
 }
 
 var (
+	xuguVersionNumber = regexp.MustCompile(`(^|[^0-9A-Za-z])([0-9]+(?:\.[0-9]+)+(?:[-+][0-9A-Za-z][0-9A-Za-z.-]*)?)($|[^0-9A-Za-z])`)
+
 	xuguReservedWords = map[string]bool{
 		"ADD":               true,
 		"ALL":               true,
@@ -177,6 +180,16 @@ var (
 	}
 )
 
+const xuguCurrentScopeSQL = `WITH CURRENT_SCOPE AS (
+	SELECT s.DB_ID, s.SCHEMA_ID
+	FROM ALL_SCHEMAS s
+	WHERE s.DB_ID = (
+		SELECT d.DB_ID FROM ALL_DATABASES d
+		WHERE d.DB_NAME = DATABASE() LIMIT 1
+	)
+	AND s.SCHEMA_NAME = CURRENT_SCHEMA()
+)`
+
 type xugu struct {
 	dialects.Base
 	rowFormat string
@@ -195,6 +208,8 @@ func (db *xugu) Quoter() schemas.Quoter {
 
 var xuguColAliases = map[string]string{
 	"numeric": "decimal",
+	"char":    "varchar",
+	"integer": "int",
 }
 
 // Alias returns a alias of column
@@ -207,7 +222,7 @@ func (db *xugu) Alias(col string) string {
 }
 
 func (db *xugu) Version(ctx context.Context, queryer core.Queryer) (*schemas.Version, error) {
-	rows, err := queryer.QueryContext(ctx, "SELECT VERSION;")
+	rows, err := queryer.QueryContext(ctx, "SELECT VERSION()")
 	if err != nil {
 		return nil, err
 	}
@@ -218,22 +233,27 @@ func (db *xugu) Version(ctx context.Context, queryer core.Queryer) (*schemas.Ver
 		if rows.Err() != nil {
 			return nil, rows.Err()
 		}
-		return nil, errors.New("unknow version")
+		return nil, errors.New("unknown version")
 	}
 
 	if err := rows.Scan(&version); err != nil {
 		return nil, err
 	}
 
-	fields := strings.Split(version, " ")
-
-	var edition string
-	if len(fields) == 2 {
-		edition = fields[0]
+	version = strings.TrimSpace(version)
+	if version == "" {
+		return nil, errors.New("unknown version")
 	}
 
+	match := xuguVersionNumber.FindStringSubmatchIndex(version)
+	if match == nil {
+		return nil, fmt.Errorf("unrecognized Xugu version response %q", version)
+	}
+	number := version[match[4]:match[5]]
+	edition := strings.TrimSpace(version[:match[4]])
+
 	return &schemas.Version{
-		Number:  fields[1],
+		Number:  number,
 		Edition: edition,
 	}, nil
 }
@@ -371,14 +391,19 @@ func (db *xugu) AutoIncrStr() string {
 
 func (db *xugu) IndexCheckSQL(tableName, idxName string) (string, []interface{}) {
 	args := []interface{}{tableName, idxName}
-	sql := `SELECT  INDEX_NAME FROM ALL_INDEXES i  
-		JOIN ALL_TABLEs t ON i.TABLE_ID = t.TABLE_ID
-		WHERE t.table_name = ? AND index_name = ?;`
+	sql := xuguCurrentScopeSQL + `
+		SELECT i.INDEX_NAME FROM ALL_INDEXES i
+		JOIN ALL_TABLES t ON i.DB_ID = t.DB_ID AND i.TABLE_ID = t.TABLE_ID
+		JOIN CURRENT_SCOPE cs ON t.DB_ID = cs.DB_ID AND t.SCHEMA_ID = cs.SCHEMA_ID
+		WHERE t.TABLE_NAME = ? AND i.INDEX_NAME = ?`
 	return sql, args
 }
 
 func (db *xugu) IsTableExist(queryer core.Queryer, ctx context.Context, tableName string) (bool, error) {
-	sql := `SELECT TABLE_NAME FROM ALL_TABLES WHERE TABLE_NAME = ?`
+	sql := xuguCurrentScopeSQL + `
+		SELECT t.TABLE_NAME FROM ALL_TABLES t
+		JOIN CURRENT_SCOPE cs ON t.DB_ID = cs.DB_ID AND t.SCHEMA_ID = cs.SCHEMA_ID
+		WHERE t.TABLE_NAME = ?`
 	return db.HasRecords(queryer, ctx, sql, tableName)
 }
 
@@ -401,12 +426,13 @@ func (db *xugu) ModifyColumnSQL(tableName string, col *schemas.Column) string {
 
 func (db *xugu) GetColumns(queryer core.Queryer, ctx context.Context, tableName string) ([]string, map[string]*schemas.Column, error) {
 	args := []interface{}{tableName}
-	s := `
-SELECT   c1.COL_NAME '字段名', c1.NOT_NULL '是否空', c1.TYPE_NAME '字段类型', c1.IS_SERIAL '是否为序列值', c1.COMMENTS '注释',c1.SCALE '数据尺寸' ,con1.DEFINE '约束定义', con1.CONS_TYPE'约束'  
-FROM all_tables t1 
-JOIN all_columns c1   ON  c1.TABLE_ID = t1.TABLE_ID 
-LEFT JOIN   all_constraints con1 ON con1.table_id =  t1.TABLE_ID AND  con1.define  like '%"'||c1.col_name||'"%' 
-WHERE t1.TABLE_NAME = ?;
+	s := xuguCurrentScopeSQL + `
+	SELECT   c1.COL_NAME '字段名', c1.NOT_NULL '是否空', c1.TYPE_NAME '字段类型', c1.IS_SERIAL '是否为序列值', c1.COMMENTS '注释',c1.SCALE '数据尺寸', c1.DEF_VAL '默认值', con1.DEFINE '约束定义', con1.CONS_TYPE'约束'
+	FROM all_tables t1
+	JOIN CURRENT_SCOPE cs ON t1.DB_ID = cs.DB_ID AND t1.SCHEMA_ID = cs.SCHEMA_ID
+	JOIN all_columns c1 ON c1.DB_ID = t1.DB_ID AND c1.TABLE_ID = t1.TABLE_ID
+	LEFT JOIN all_constraints con1 ON con1.DB_ID = t1.DB_ID AND con1.TABLE_ID = t1.TABLE_ID AND con1.define like '%"'||c1.col_name||'"%'
+	WHERE t1.TABLE_NAME = ?;
 `
 
 	rows, err := queryer.QueryContext(ctx, s, args...)
@@ -424,18 +450,24 @@ WHERE t1.TABLE_NAME = ?;
 
 		var scale int64
 		var colNaame, typeName string
-		var comment, define, cons_type sql.NullString
+		// XuguDB 12 exposes the column default expression as ALL_COLUMNS.DEF_VAL.
+		// ALL_COLUMNS.DEFAULT_VALUE and ALL_COLUMNS.DEFINE do not exist on that server version.
+		var comment, defaultValue, define, cons_type sql.NullString
 		var notNUll, isSerial bool
 
-		err = rows.Scan(&colNaame, &notNUll, &typeName, &isSerial, &comment, &scale, &define, &cons_type)
+		err = rows.Scan(&colNaame, &notNUll, &typeName, &isSerial, &comment, &scale, &defaultValue, &define, &cons_type)
 		if err != nil {
 			return nil, nil, err
 		}
 		col.Name = colNaame
 		col.Comment = comment.String
 		col.Nullable = !notNUll
+		col.IsAutoIncrement = isSerial
+		col.Default = strings.TrimSpace(defaultValue.String)
+		col.DefaultIsEmpty = !defaultValue.Valid
 
-		col.SQLType = schemas.SQLType{Name: typeName, DefaultLength: int64(scale), DefaultLength2: 0}
+		col.SQLType = schemas.SQLType{Name: db.Alias(typeName), DefaultLength: int64(scale), DefaultLength2: 0}
+		col.Length = scale
 		if cons_type.Valid {
 			switch cons_type.String {
 			case "P":
@@ -453,7 +485,9 @@ WHERE t1.TABLE_NAME = ?;
 }
 
 func (db *xugu) GetTables(queryer core.Queryer, ctx context.Context) ([]*schemas.Table, error) {
-	sql := `SELECT TABLE_NAME FROM ALL_TABLES`
+	sql := xuguCurrentScopeSQL + `
+		SELECT t.TABLE_NAME FROM ALL_TABLES t
+		JOIN CURRENT_SCOPE cs ON t.DB_ID = cs.DB_ID AND t.SCHEMA_ID = cs.SCHEMA_ID`
 	rows, err := queryer.QueryContext(ctx, sql)
 	if err != nil {
 		return nil, err
@@ -498,36 +532,40 @@ func (db *xugu) SetQuotePolicy(quotePolicy dialects.QuotePolicy) {
 }
 
 func (db *xugu) GetIndexes(queryer core.Queryer, ctx context.Context, tableName string) (map[string]*schemas.Index, error) {
-	// ALL_IND_COLUMNS 不是所有虚谷版本都存在。
-	// 索引信息通过 ALL_INDEXES 获取；列信息不可用时的降级策略是返回空 map，
-	// 这比 fail 整个 DBMetas 更安全。
+	// XuguDB 12 stores an index's column list in ALL_INDEXES.KEYS; the
+	// Oracle-compatible ALL_IND_COLUMNS view is not present in this version.
 	args := []interface{}{tableName}
-	s := `SELECT i.INDEX_NAME, i.UNIQUENESS, c.COLUMN_NAME
-		FROM ALL_INDEXES i
-		LEFT JOIN ALL_IND_COLUMNS c ON i.INDEX_NAME = c.INDEX_NAME
-		JOIN ALL_TABLES t ON i.TABLE_ID = t.TABLE_ID
-		WHERE t.TABLE_NAME = ? AND i.INDEX_NAME NOT LIKE 'SYS%'
-		ORDER BY c.COLUMN_POSITION`
+	s := xuguCurrentScopeSQL + `
+		SELECT i.INDEX_NAME, i.KEYS, i.IS_UNIQUE, i.IS_PRIMARY
+			FROM ALL_INDEXES i
+			JOIN ALL_TABLES t ON i.DB_ID = t.DB_ID AND i.TABLE_ID = t.TABLE_ID
+			JOIN CURRENT_SCOPE cs ON t.DB_ID = cs.DB_ID AND t.SCHEMA_ID = cs.SCHEMA_ID
+			WHERE t.TABLE_NAME = ? AND i.INDEX_NAME NOT LIKE 'SYS%'
+			ORDER BY i.INDEX_NAME`
 
 	rows, err := queryer.QueryContext(ctx, s, args...)
 	if err != nil {
-		// 系统表缺失时返回空索引，不中断 DBMetas 流程
-		return make(map[string]*schemas.Index), nil
+		return nil, err
 	}
 	defer rows.Close()
 
 	indexes := make(map[string]*schemas.Index)
 	for rows.Next() {
-		var indexName, uniqueness, colName string
-		if err := rows.Scan(&indexName, &uniqueness, &colName); err != nil {
+		var indexName, keys, uniqueness, primary string
+		if err := rows.Scan(&indexName, &keys, &uniqueness, &primary); err != nil {
 			return nil, err
+		}
+		switch strings.ToUpper(strings.TrimSpace(primary)) {
+		case "TRUE", "YES", "1":
+			continue
 		}
 
 		indexName = strings.TrimSpace(indexName)
 		var indexType int
-		if strings.ToUpper(strings.TrimSpace(uniqueness)) == "UNIQUE" {
+		switch strings.ToUpper(strings.TrimSpace(uniqueness)) {
+		case "UNIQUE", "TRUE", "YES", "1":
 			indexType = schemas.UniqueType
-		} else {
+		default:
 			indexType = schemas.IndexType
 		}
 		idx, ok := indexes[indexName]
@@ -537,8 +575,12 @@ func (db *xugu) GetIndexes(queryer core.Queryer, ctx context.Context, tableName 
 			idx.Type = indexType
 			indexes[indexName] = idx
 		}
-		if colName != "" {
-			idx.AddColumn(colName)
+		columns, err := parseXuguIndexKeys(keys)
+		if err != nil {
+			return nil, fmt.Errorf("parse index %q keys: %w", indexName, err)
+		}
+		for _, column := range columns {
+			idx.AddColumn(column)
 		}
 	}
 	if rows.Err() != nil {
@@ -546,6 +588,56 @@ func (db *xugu) GetIndexes(queryer core.Queryer, ctx context.Context, tableName 
 	}
 
 	return indexes, nil
+}
+
+func parseXuguIndexKeys(keys string) ([]string, error) {
+	var columns []string
+	for pos := 0; ; {
+		for pos < len(keys) && strings.ContainsRune(" \t\r\n", rune(keys[pos])) {
+			pos++
+		}
+		if pos == len(keys) {
+			if len(columns) == 0 {
+				return nil, errors.New("empty KEYS value")
+			}
+			return columns, nil
+		}
+		if keys[pos] != '"' {
+			return nil, fmt.Errorf("unsupported KEYS encoding at byte %d", pos)
+		}
+		pos++
+		var column strings.Builder
+		closed := false
+		for pos < len(keys) {
+			if keys[pos] != '"' {
+				column.WriteByte(keys[pos])
+				pos++
+				continue
+			}
+			if pos+1 < len(keys) && keys[pos+1] == '"' {
+				column.WriteByte('"')
+				pos += 2
+				continue
+			}
+			pos++
+			closed = true
+			break
+		}
+		if !closed || column.Len() == 0 {
+			return nil, errors.New("malformed quoted identifier in KEYS")
+		}
+		columns = append(columns, column.String())
+		for pos < len(keys) && strings.ContainsRune(" \t\r\n", rune(keys[pos])) {
+			pos++
+		}
+		if pos == len(keys) {
+			return columns, nil
+		}
+		if keys[pos] != ',' {
+			return nil, fmt.Errorf("unsupported KEYS suffix at byte %d", pos)
+		}
+		pos++
+	}
 }
 
 func (db *xugu) ColumnString(d dialects.Dialect, col *schemas.Column, includePrimaryKey bool) (string, error) {
@@ -630,7 +722,10 @@ func (db *xugu) CreateTableSQL(ctx context.Context, queryer core.Queryer, table 
 				col.Default = "0"
 			}
 		}
-		s, _ := db.ColumnString(db, col, col.IsPrimaryKey && len(table.PrimaryKeys) == 1)
+		s, err := db.ColumnString(db, col, col.IsPrimaryKey && len(table.PrimaryKeys) == 1)
+		if err != nil {
+			return "", false, err
+		}
 		if _, err := b.WriteString(s); err != nil {
 			return "", false, err
 		}

@@ -1,0 +1,142 @@
+package blackbox
+
+import (
+	cryptorand "crypto/rand"
+	"encoding/hex"
+	"fmt"
+	"os"
+	"testing"
+
+	_ "gitee.com/XuguDB/go-xugu-driver"
+	_ "github.com/Xugu-Open-Source/xugu-xorm"
+	"xorm.io/xorm"
+	"xorm.io/xorm/dialects"
+)
+
+type consumerUser struct {
+	Id   int64  `xorm:"pk autoincr"`
+	Name string `xorm:"varchar(100) notnull"`
+}
+
+var consumerTableName = newConsumerTableName()
+
+func (consumerUser) TableName() string {
+	return consumerTableName
+}
+
+func newConsumerTableName() string {
+	var token [6]byte
+	if _, err := cryptorand.Read(token[:]); err == nil {
+		return "xugu_xorm_blackbox_" + hex.EncodeToString(token[:])
+	}
+
+	return fmt.Sprintf("xugu_xorm_blackbox_%d", os.Getpid())
+}
+
+func TestConsumerRegistration(t *testing.T) {
+	if dialects.QueryDriver("xugu") == nil {
+		t.Fatal("xugu driver is not registered")
+	}
+	if dialects.QueryDialect("xugusql") == nil {
+		t.Fatal("xugusql dialect is not registered")
+	}
+}
+
+func TestConsumerRealDatabaseFlow(t *testing.T) {
+	if os.Getenv("XUGU_IT") != "1" {
+		t.Skip("set XUGU_IT=1 and XUGU_TEST_DSN to run the real-database consumer flow")
+	}
+
+	dsn := os.Getenv("XUGU_TEST_DSN")
+	if dsn == "" {
+		t.Fatal("XUGU_TEST_DSN is required when XUGU_IT=1")
+	}
+
+	engine, err := xorm.NewEngine("xugu", dsn)
+	if err != nil {
+		t.Fatalf("NewEngine: %v", err)
+	}
+	defer engine.Close()
+
+	if err := engine.Ping(); err != nil {
+		t.Fatalf("Ping: %v", err)
+	}
+
+	if err := engine.DropTables(new(consumerUser)); err != nil {
+		t.Fatalf("drop existing test table: %v", err)
+	}
+	defer engine.DropTables(new(consumerUser))
+
+	if err := engine.Sync2(new(consumerUser)); err != nil {
+		t.Fatalf("Sync2: %v", err)
+	}
+
+	user := &consumerUser{Name: "blackbox"}
+	affected, err := engine.Insert(user)
+	if err != nil {
+		t.Fatalf("Insert: %v", err)
+	}
+	if affected != 1 || user.Id == 0 {
+		t.Fatalf("Insert result: affected=%d id=%d", affected, user.Id)
+	}
+
+	var got consumerUser
+	has, err := engine.ID(user.Id).Get(&got)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if !has || got.Name != user.Name {
+		t.Fatalf("Get result: has=%v user=%+v", has, got)
+	}
+
+	if _, err := engine.Insert(&consumerUser{Name: "page-1"}, &consumerUser{Name: "page-2"}); err != nil {
+		t.Fatalf("Insert pagination rows: %v", err)
+	}
+	var page []consumerUser
+	if err := engine.Asc("id").Limit(2, 1).Find(&page); err != nil {
+		t.Fatalf("Find page: %v", err)
+	}
+	if len(page) != 2 || page[0].Name != "page-1" || page[1].Name != "page-2" {
+		t.Fatalf("unexpected page: %+v", page)
+	}
+
+	session := engine.NewSession()
+	defer session.Close()
+	if err := session.Begin(); err != nil {
+		t.Fatalf("Begin: %v", err)
+	}
+	if _, err := session.Insert(&consumerUser{Name: "committed"}); err != nil {
+		_ = session.Rollback()
+		t.Fatalf("transaction Insert: %v", err)
+	}
+	if err := session.Commit(); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+
+	count, err := engine.Count(&consumerUser{})
+	if err != nil {
+		t.Fatalf("Count after Commit: %v", err)
+	}
+	if count != 4 {
+		t.Fatalf("Count after Commit: got %d want 4", count)
+	}
+
+	if err := session.Begin(); err != nil {
+		t.Fatalf("Begin rollback transaction: %v", err)
+	}
+	if _, err := session.Insert(&consumerUser{Name: "rolled-back"}); err != nil {
+		_ = session.Rollback()
+		t.Fatalf("rollback transaction Insert: %v", err)
+	}
+	if err := session.Rollback(); err != nil {
+		t.Fatalf("Rollback: %v", err)
+	}
+
+	count, err = engine.Count(&consumerUser{})
+	if err != nil {
+		t.Fatalf("Count after Rollback: %v", err)
+	}
+	if count != 4 {
+		t.Fatalf("Count after Rollback: got %d want 4", count)
+	}
+}
